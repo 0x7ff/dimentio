@@ -11,7 +11,7 @@
 #define IO_DT_NVRAM_OF_DICT_OFF (0xC0)
 #define TASK_ITK_REGISTERED_OFF (0x2E8)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
-#define DEFAULT_NONCE (0x1111111111111111ULL)
+#define VM_KERNEL_LINK_ADDRESS (0xFFFFFFF007004000ULL)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
 #define APPLE_MOBILE_AP_NONCE_BOOT_NONCE_OS_SYMBOL_OFF (0xC0)
 
@@ -178,7 +178,7 @@ get_kbase(kaddr_t *kslide) {
 
 	if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
 		*kslide = dyld_info.all_image_info_size;
-		return dyld_info.all_image_info_addr;
+		return VM_KERNEL_LINK_ADDRESS + *kslide;
 	}
 	return 0;
 }
@@ -432,6 +432,28 @@ nonce_generate(io_service_t nonce_serv) {
 	return ret;
 }
 
+static kern_return_t
+get_boot_nonce_os_symbol(io_service_t nonce_serv, kaddr_t *boot_nonce_os_symbol) {
+	kaddr_t nonce_object;
+
+	if(get_object(nonce_serv, &nonce_object) == KERN_SUCCESS) {
+		printf("nonce_object: " KADDR_FMT "\n", nonce_object);
+		return kread_addr(nonce_object + APPLE_MOBILE_AP_NONCE_BOOT_NONCE_OS_SYMBOL_OFF, boot_nonce_os_symbol);
+	}
+	return KERN_FAILURE;
+}
+
+static kern_return_t
+get_of_dict(io_service_t nvram_serv, kaddr_t *of_dict) {
+	kaddr_t nvram_object;
+
+	if(get_object(nvram_serv, &nvram_object) == KERN_SUCCESS) {
+		printf("nvram_object: " KADDR_FMT "\n", nvram_object);
+		return kread_addr(nvram_object + IO_DT_NVRAM_OF_DICT_OFF, of_dict);
+	}
+	return KERN_FAILURE;
+}
+
 static kaddr_t
 lookup_key_in_os_dict(kaddr_t os_dict, kaddr_t key) {
 	kaddr_t os_dict_entry_ptr, value = 0;
@@ -467,7 +489,7 @@ sync_nonce(io_service_t nvram_serv) {
 
 static void
 dimentio(uint64_t nonce) {
-	kaddr_t nonce_object, boot_nonce_os_symbol, nvram_object, of_dict, os_string, string_ptr;
+	kaddr_t boot_nonce_os_symbol, of_dict, os_string, string_ptr;
 	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
 	io_service_t nonce_serv, nvram_serv;
 
@@ -475,30 +497,24 @@ dimentio(uint64_t nonce) {
 		printf("our_task: " KADDR_FMT "\n", our_task);
 		if((nonce_serv = get_serv("AppleMobileApNonce")) != IO_OBJECT_NULL) {
 			printf("nonce_serv: 0x%" PRIx32 "\n", nonce_serv);
-			if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_object(nonce_serv, &nonce_object) == KERN_SUCCESS) {
-				printf("nonce_object: " KADDR_FMT "\n", nonce_object);
-				if(kread_addr(nonce_object + APPLE_MOBILE_AP_NONCE_BOOT_NONCE_OS_SYMBOL_OFF, &boot_nonce_os_symbol) == KERN_SUCCESS) {
-					printf("boot_nonce_os_symbol: " KADDR_FMT "\n", boot_nonce_os_symbol);
-					if((nvram_serv = get_serv("IODTNVRAM")) != IO_OBJECT_NULL) {
-						printf("nvram_serv: 0x%" PRIx32 "\n", nvram_serv);
-						if(get_object(nvram_serv, &nvram_object) == KERN_SUCCESS) {
-							printf("nvram_object: " KADDR_FMT "\n", nvram_object);
-							if(kread_addr(nvram_object + IO_DT_NVRAM_OF_DICT_OFF, &of_dict) == KERN_SUCCESS) {
-								printf("of_dict: " KADDR_FMT "\n", of_dict);
-								if((os_string = lookup_key_in_os_dict(of_dict, boot_nonce_os_symbol))) {
-									printf("os_string: " KADDR_FMT "\n", os_string);
-									if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr) {
-										printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-										snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
-										if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
-											printf("Set nonce to 0x%016" PRIx64 "\n", nonce);
-										}
-									}
+			if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_boot_nonce_os_symbol(nonce_serv, &boot_nonce_os_symbol) == KERN_SUCCESS) {
+				printf("boot_nonce_os_symbol: " KADDR_FMT "\n", boot_nonce_os_symbol);
+				if((nvram_serv = get_serv("IODTNVRAM")) != IO_OBJECT_NULL) {
+					printf("nvram_serv: 0x%" PRIx32 "\n", nvram_serv);
+					if(get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS) {
+						printf("of_dict: " KADDR_FMT "\n", of_dict);
+						if((os_string = lookup_key_in_os_dict(of_dict, boot_nonce_os_symbol))) {
+							printf("os_string: " KADDR_FMT "\n", os_string);
+							if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr) {
+								printf("string_ptr: " KADDR_FMT "\n", string_ptr);
+								snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
+								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
+									printf("Set nonce to 0x%016" PRIx64 "\n", nonce);
 								}
 							}
 						}
-						IOObjectRelease(nvram_serv);
 					}
+					IOObjectRelease(nvram_serv);
 				}
 			}
 			IOObjectRelease(nonce_serv);
@@ -507,25 +523,30 @@ dimentio(uint64_t nonce) {
 }
 
 int
-main(void) {
+main(int argc, char **argv) {
 	kaddr_t kbase, kslide;
 	pfinder_t pfinder;
+	uint64_t nonce;
 
-	if(init_arm_pgshift() == KERN_SUCCESS) {
-		printf("arm_pgshift: %u\n", arm_pgshift);
-		if(init_tfp0() == KERN_SUCCESS) {
-			printf("tfp0: 0x%" PRIx32 "\n", tfp0);
-			if((kbase = get_kbase(&kslide))) {
-				printf("kbase: " KADDR_FMT "\n", kbase);
-				printf("kslide: " KADDR_FMT "\n", kslide);
-				if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
-					if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
-						dimentio(DEFAULT_NONCE);
+	if(argc == 2 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
+		if(init_arm_pgshift() == KERN_SUCCESS) {
+			printf("arm_pgshift: %u\n", arm_pgshift);
+			if(init_tfp0() == KERN_SUCCESS) {
+				printf("tfp0: 0x%" PRIx32 "\n", tfp0);
+				if((kbase = get_kbase(&kslide))) {
+					printf("kbase: " KADDR_FMT "\n", kbase);
+					printf("kslide: " KADDR_FMT "\n", kslide);
+					if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
+						if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
+							dimentio(nonce);
+						}
+						pfinder_term(&pfinder);
 					}
-					pfinder_term(&pfinder);
 				}
+				mach_port_deallocate(mach_task_self(), tfp0);
 			}
-			mach_port_deallocate(mach_task_self(), tfp0);
 		}
+	} else {
+		printf("Usage: %s nonce\n", argv[0]);
 	}
 }
