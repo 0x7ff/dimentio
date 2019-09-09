@@ -1,3 +1,4 @@
+#include <CommonCrypto/CommonCrypto.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
@@ -389,7 +390,7 @@ find_task(pid_t pid, kaddr_t *task) {
 static io_service_t
 get_serv(const char *name) {
 	io_service_t serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching(name));
-	
+
 	return MACH_PORT_VALID(serv) ? serv : IO_OBJECT_NULL;
 }
 
@@ -522,13 +523,30 @@ dimentio(uint64_t nonce) {
 	}
 }
 
+static void
+entangle_nonce(uint64_t nonce, const void *key) {
+	uint8_t entangled_nonce[SHA384_DIGEST_LENGTH];
+	uint64_t src[] = { 0, nonce }, dst[2];
+	size_t i, out_sz;
+
+	if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key, kCCKeySizeAES128, NULL, src, sizeof(src), dst, sizeof(dst), &out_sz) == kCCSuccess && out_sz == sizeof(dst)) {
+		CC_SHA384(dst, sizeof(dst), entangled_nonce);
+		printf("entangled_nonce: ");
+		for(i = 0; i < sizeof(entangled_nonce); ++i) {
+			printf("%02x", entangled_nonce[i]);
+		}
+		putchar('\n');
+	}
+}
+
 int
 main(int argc, char **argv) {
 	kaddr_t kbase, kslide;
 	pfinder_t pfinder;
+	uint32_t key[4];
 	uint64_t nonce;
 
-	if(argc == 2 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
+	if(argc > 1 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
 		if(init_arm_pgshift() == KERN_SUCCESS) {
 			printf("arm_pgshift: %u\n", arm_pgshift);
 			if(init_tfp0() == KERN_SUCCESS) {
@@ -539,6 +557,9 @@ main(int argc, char **argv) {
 					if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
 						if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
 							dimentio(nonce);
+							if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
+								entangle_nonce(nonce, key);
+							}
 						}
 						pfinder_term(&pfinder);
 					}
@@ -547,6 +568,6 @@ main(int argc, char **argv) {
 			}
 		}
 	} else {
-		printf("Usage: %s nonce\n", argv[0]);
+		printf("Usage: %s nonce [key_8a3]\n", argv[0]);
 	}
 }
