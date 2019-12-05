@@ -5,13 +5,14 @@
 #include <sys/sysctl.h>
 
 #define PROC_TASK_OFF (0x10)
-#define PROC_P_PID_OFF (0x60)
+#define PROC_P_PID_OFF (0x68)
 #define OS_STRING_STRING_OFF (0x10)
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define IO_DT_NVRAM_OF_DICT_OFF (0xC0)
-#define TASK_ITK_REGISTERED_OFF (0x2E8)
+#define TASK_ITK_REGISTERED_OFF (0x308)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
+#define CPU_DATA_CPU_EXC_VECTORS_OFF (0xE0)
 #define VM_KERNEL_LINK_ADDRESS (0xFFFFFFF007004000ULL)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
 #define APPLE_MOBILE_AP_NONCE_BOOT_NONCE_OS_SYMBOL_OFF (0xC0)
@@ -19,6 +20,7 @@
 #define ARM_PGSHIFT_4K (12U)
 #define ARM_PGSHIFT_16K (14U)
 #define KADDR_FMT "0x%" PRIx64
+#define VM_KERN_MEMORY_CPU (9)
 #define RD(a) extract32(a, 0, 5)
 #define RN(a) extract32(a, 5, 5)
 #define SHA384_DIGEST_LENGTH (48)
@@ -86,6 +88,9 @@ kern_return_t
 mach_vm_machine_attribute(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_machine_attribute_t, vm_machine_attribute_val_t *);
 
 kern_return_t
+mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
+
+kern_return_t
 mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
 
 kern_return_t
@@ -140,6 +145,7 @@ init_arm_pgshift(void) {
 			case CPUFAMILY_ARM_HURRICANE:
 			case CPUFAMILY_ARM_MONSOON_MISTRAL:
 			case CPUFAMILY_ARM_VORTEX_TEMPEST:
+			case CPUFAMILY_ARM_LIGHTNING_THUNDER:
 				arm_pgshift = ARM_PGSHIFT_16K;
 				return KERN_SUCCESS;
 			default:
@@ -170,18 +176,6 @@ init_tfp0(void) {
 		mach_port_deallocate(mach_task_self(), tfp0);
 	}
 	return KERN_FAILURE;
-}
-
-static kaddr_t
-get_kbase(kaddr_t *kslide) {
-	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
-	task_dyld_info_data_t dyld_info;
-
-	if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
-		*kslide = dyld_info.all_image_info_size;
-		return VM_KERNEL_LINK_ADDRESS + *kslide;
-	}
-	return 0;
 }
 
 static kern_return_t
@@ -235,6 +229,44 @@ kwrite_buf(kaddr_t addr, const void *buf, mach_msg_type_number_t sz) {
 		addr += write_sz;
 	}
 	return KERN_SUCCESS;
+}
+
+static kaddr_t
+get_kbase(kaddr_t *kslide) {
+	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
+	vm_region_extended_info_data_t extended_info;
+	task_dyld_info_data_t dyld_info;
+	kaddr_t addr, cpu_exc_vectors;
+	mach_port_t obj_nm;
+	mach_vm_size_t sz;
+	uint32_t magic;
+
+	if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS && dyld_info.all_image_info_size) {
+		*kslide = dyld_info.all_image_info_size;
+		return VM_KERNEL_LINK_ADDRESS + *kslide;
+	} else {
+		addr = 0;
+		cnt = VM_REGION_EXTENDED_INFO_COUNT;
+		while(mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &obj_nm) == KERN_SUCCESS) {
+			mach_port_deallocate(mach_task_self(), obj_nm);
+			if(extended_info.user_tag == VM_KERN_MEMORY_CPU && extended_info.protection == VM_PROT_DEFAULT) {
+				if(kread_addr(addr + CPU_DATA_CPU_EXC_VECTORS_OFF, &cpu_exc_vectors) != KERN_SUCCESS || (cpu_exc_vectors & ARM_PGMASK)) {
+					break;
+				}
+				printf("cpu_exc_vectors: " KADDR_FMT "\n", cpu_exc_vectors);
+				do {
+					cpu_exc_vectors -= ARM_PGBYTES;
+					if(cpu_exc_vectors <= VM_KERNEL_LINK_ADDRESS || kread_buf(cpu_exc_vectors, &magic, sizeof(magic)) != KERN_SUCCESS) {
+						return 0;
+					}
+				} while(magic != MH_MAGIC_64);
+				*kslide = cpu_exc_vectors - VM_KERNEL_LINK_ADDRESS;
+				return cpu_exc_vectors;
+			}
+			addr += sz;
+		}
+	}
+	return 0;
 }
 
 static const struct section_64 *
