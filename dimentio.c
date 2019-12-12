@@ -5,17 +5,19 @@
 #include <sys/sysctl.h>
 
 #define PROC_TASK_OFF (0x10)
-#define PROC_P_PID_OFF (0x68)
 #define OS_STRING_STRING_OFF (0x10)
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define IO_DT_NVRAM_OF_DICT_OFF (0xC0)
-#define TASK_ITK_REGISTERED_OFF (0x308)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
 #define CPU_DATA_CPU_EXC_VECTORS_OFF (0xE0)
 #define VM_KERNEL_LINK_ADDRESS (0xFFFFFFF007004000ULL)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
+#define kCFCoreFoundationVersionNumber_iOS_13_0_b2 (1656)
+#define kCFCoreFoundationVersionNumber_iOS_13_0_b1 (1652.20)
 #define APPLE_MOBILE_AP_NONCE_BOOT_NONCE_OS_SYMBOL_OFF (0xC0)
+#define PROC_P_PID_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b2 ? 0x68 : 0x60)
+#define TASK_ITK_REGISTERED_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b1 ? 0x308 : 0x2E8)
 
 #define ARM_PGSHIFT_4K (12U)
 #define ARM_PGSHIFT_16K (14U)
@@ -76,9 +78,6 @@ typedef struct {
 } dict_entry_t;
 
 kern_return_t
-mach_vm_allocate(vm_map_t, mach_vm_address_t *, mach_vm_size_t, int);
-
-kern_return_t
 mach_vm_write(vm_map_t, mach_vm_address_t, vm_offset_t, mach_msg_type_number_t);
 
 kern_return_t
@@ -89,9 +88,6 @@ mach_vm_machine_attribute(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_machin
 
 kern_return_t
 mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
-
-kern_return_t
-mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
 
 kern_return_t
 IOObjectRelease(io_object_t);
@@ -244,27 +240,26 @@ get_kbase(kaddr_t *kslide) {
 	if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS && dyld_info.all_image_info_size) {
 		*kslide = dyld_info.all_image_info_size;
 		return VM_KERNEL_LINK_ADDRESS + *kslide;
-	} else {
-		addr = 0;
-		cnt = VM_REGION_EXTENDED_INFO_COUNT;
-		while(mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &obj_nm) == KERN_SUCCESS) {
-			mach_port_deallocate(mach_task_self(), obj_nm);
-			if(extended_info.user_tag == VM_KERN_MEMORY_CPU && extended_info.protection == VM_PROT_DEFAULT) {
-				if(kread_addr(addr + CPU_DATA_CPU_EXC_VECTORS_OFF, &cpu_exc_vectors) != KERN_SUCCESS || (cpu_exc_vectors & ARM_PGMASK)) {
-					break;
-				}
-				printf("cpu_exc_vectors: " KADDR_FMT "\n", cpu_exc_vectors);
-				do {
-					cpu_exc_vectors -= ARM_PGBYTES;
-					if(cpu_exc_vectors <= VM_KERNEL_LINK_ADDRESS || kread_buf(cpu_exc_vectors, &magic, sizeof(magic)) != KERN_SUCCESS) {
-						return 0;
-					}
-				} while(magic != MH_MAGIC_64);
-				*kslide = cpu_exc_vectors - VM_KERNEL_LINK_ADDRESS;
-				return cpu_exc_vectors;
+	}
+	addr = 0;
+	cnt = VM_REGION_EXTENDED_INFO_COUNT;
+	while(mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &obj_nm) == KERN_SUCCESS) {
+		mach_port_deallocate(mach_task_self(), obj_nm);
+		if(extended_info.user_tag == VM_KERN_MEMORY_CPU && extended_info.protection == VM_PROT_DEFAULT) {
+			if(kread_addr(addr + CPU_DATA_CPU_EXC_VECTORS_OFF, &cpu_exc_vectors) != KERN_SUCCESS || (cpu_exc_vectors & ARM_PGMASK)) {
+				break;
 			}
-			addr += sz;
+			printf("cpu_exc_vectors: " KADDR_FMT "\n", cpu_exc_vectors);
+			do {
+				cpu_exc_vectors -= ARM_PGBYTES;
+				if(cpu_exc_vectors <= VM_KERNEL_LINK_ADDRESS || kread_buf(cpu_exc_vectors, &magic, sizeof(magic)) != KERN_SUCCESS) {
+					return 0;
+				}
+			} while(magic != MH_MAGIC_64);
+			*kslide = cpu_exc_vectors - VM_KERNEL_LINK_ADDRESS;
+			return cpu_exc_vectors;
 		}
+		addr += sz;
 	}
 	return 0;
 }
@@ -565,7 +560,7 @@ entangle_nonce(uint64_t nonce, const void *key) {
 		CC_SHA384(dst, sizeof(dst), entangled_nonce);
 		printf("entangled_nonce: ");
 		for(i = 0; i < sizeof(entangled_nonce); ++i) {
-			printf("%02x", entangled_nonce[i]);
+			printf("%02" PRIx8, entangled_nonce[i]);
 		}
 		putchar('\n');
 	}
