@@ -10,7 +10,11 @@
 #define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define IO_DT_NVRAM_OF_DICT_OFF (0xC0)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
-#define CPU_DATA_CPU_EXC_VECTORS_OFF (0xE0)
+#ifdef __arm64e__
+#	define CPU_DATA_RTCLOCK_DATAP_OFF (0x190)
+#else
+#	define CPU_DATA_RTCLOCK_DATAP_OFF (0x198)
+#endif
 #define VM_KERNEL_LINK_ADDRESS (0xFFFFFFF007004000ULL)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
 #define kCFCoreFoundationVersionNumber_iOS_13_0_b2 (1656)
@@ -19,8 +23,6 @@
 #define PROC_P_PID_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b2 ? 0x68 : 0x60)
 #define TASK_ITK_REGISTERED_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b1 ? 0x308 : 0x2E8)
 
-#define ARM_PGSHIFT_4K (12U)
-#define ARM_PGSHIFT_16K (14U)
 #define KADDR_FMT "0x%" PRIx64
 #define VM_KERN_MEMORY_CPU (9)
 #define RD(a) extract32(a, 0, 5)
@@ -28,9 +30,7 @@
 #define SHA384_DIGEST_LENGTH (48)
 #define IS_RET(a) ((a) == 0xD65F03C0U)
 #define ADRP_ADDR(a) ((a) & ~0xFFFULL)
-#define ARM_PGMASK (ARM_PGBYTES - 1ULL)
 #define ADRP_IMM(a) (ADR_IMM(a) << 12U)
-#define ARM_PGBYTES (1U << arm_pgshift)
 #define IO_OBJECT_NULL ((io_object_t)0)
 #define ADD_X_IMM(a) extract32(a, 10, 12)
 #define LDR_X_IMM(a) (sextract64(a, 5, 19) << 2U)
@@ -112,7 +112,6 @@ IOServiceClose(io_connect_t);
 
 extern const mach_port_t kIOMasterPortDefault;
 
-static unsigned arm_pgshift;
 static kaddr_t allproc, our_task;
 static task_t tfp0 = MACH_PORT_NULL;
 
@@ -124,31 +123,6 @@ extract32(uint32_t value, unsigned start, unsigned length) {
 static uint64_t
 sextract64(uint64_t value, unsigned start, unsigned length) {
 	return (uint64_t)((int64_t)(value << (64U - length - start)) >> (64U - length));
-}
-
-static kern_return_t
-init_arm_pgshift(void) {
-	int cpufamily = CPUFAMILY_UNKNOWN;
-	size_t len = sizeof(cpufamily);
-
-	if(!sysctlbyname("hw.cpufamily", &cpufamily, &len, NULL, 0)) {
-		switch(cpufamily) {
-			case CPUFAMILY_ARM_CYCLONE:
-			case CPUFAMILY_ARM_TYPHOON:
-				arm_pgshift = ARM_PGSHIFT_4K;
-				return KERN_SUCCESS;
-			case CPUFAMILY_ARM_TWISTER:
-			case CPUFAMILY_ARM_HURRICANE:
-			case CPUFAMILY_ARM_MONSOON_MISTRAL:
-			case CPUFAMILY_ARM_VORTEX_TEMPEST:
-			case CPUFAMILY_ARM_LIGHTNING_THUNDER:
-				arm_pgshift = ARM_PGSHIFT_16K;
-				return KERN_SUCCESS;
-			default:
-				break;
-		}
-	}
-	return KERN_FAILURE;
 }
 
 static kern_return_t
@@ -180,7 +154,7 @@ kread_buf(kaddr_t addr, void *buf, mach_vm_size_t sz) {
 	mach_vm_size_t read_sz, out_sz = 0;
 
 	while(sz) {
-		read_sz = MIN(sz, ARM_PGBYTES - (addr & ARM_PGMASK));
+		read_sz = MIN(sz, vm_kernel_page_size - (addr & vm_kernel_page_mask));
 		if(mach_vm_read_overwrite(tfp0, addr, read_sz, p, &out_sz) != KERN_SUCCESS || out_sz != read_sz) {
 			return KERN_FAILURE;
 		}
@@ -216,7 +190,7 @@ kwrite_buf(kaddr_t addr, const void *buf, mach_msg_type_number_t sz) {
 	mach_msg_type_number_t write_sz;
 
 	while(sz) {
-		write_sz = MIN(sz, ARM_PGBYTES - (addr & ARM_PGMASK));
+		write_sz = (mach_msg_type_number_t)MIN(sz, vm_kernel_page_size - (addr & vm_kernel_page_mask));
 		if(mach_vm_write(tfp0, addr, p, write_sz) != KERN_SUCCESS || mach_vm_machine_attribute(tfp0, addr, write_sz, MATTR_CACHE, &mattr_val) != KERN_SUCCESS) {
 			return KERN_FAILURE;
 		}
@@ -232,7 +206,7 @@ get_kbase(kaddr_t *kslide) {
 	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
 	vm_region_extended_info_data_t extended_info;
 	task_dyld_info_data_t dyld_info;
-	kaddr_t addr, cpu_exc_vectors;
+	kaddr_t addr, rtclock_datap;
 	mach_port_t obj_nm;
 	mach_vm_size_t sz;
 	uint32_t magic;
@@ -246,18 +220,19 @@ get_kbase(kaddr_t *kslide) {
 	while(mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &obj_nm) == KERN_SUCCESS) {
 		mach_port_deallocate(mach_task_self(), obj_nm);
 		if(extended_info.user_tag == VM_KERN_MEMORY_CPU && extended_info.protection == VM_PROT_DEFAULT) {
-			if(kread_addr(addr + CPU_DATA_CPU_EXC_VECTORS_OFF, &cpu_exc_vectors) != KERN_SUCCESS || (cpu_exc_vectors & ARM_PGMASK)) {
+			if(kread_addr(addr + CPU_DATA_RTCLOCK_DATAP_OFF, &rtclock_datap) != KERN_SUCCESS) {
 				break;
 			}
-			printf("cpu_exc_vectors: " KADDR_FMT "\n", cpu_exc_vectors);
+			printf("rtclock_datap: " KADDR_FMT "\n", rtclock_datap);
+			rtclock_datap = trunc_page_kernel(rtclock_datap);
 			do {
-				cpu_exc_vectors -= ARM_PGBYTES;
-				if(cpu_exc_vectors <= VM_KERNEL_LINK_ADDRESS || kread_buf(cpu_exc_vectors, &magic, sizeof(magic)) != KERN_SUCCESS) {
+				rtclock_datap -= vm_kernel_page_size;
+				if(rtclock_datap <= VM_KERNEL_LINK_ADDRESS || kread_buf(rtclock_datap, &magic, sizeof(magic)) != KERN_SUCCESS) {
 					return 0;
 				}
 			} while(magic != MH_MAGIC_64);
-			*kslide = cpu_exc_vectors - VM_KERNEL_LINK_ADDRESS;
-			return cpu_exc_vectors;
+			*kslide = rtclock_datap - VM_KERNEL_LINK_ADDRESS;
+			return rtclock_datap;
 		}
 		addr += sz;
 	}
@@ -574,25 +549,22 @@ main(int argc, char **argv) {
 	uint64_t nonce;
 
 	if(argc > 1 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-		if(init_arm_pgshift() == KERN_SUCCESS) {
-			printf("arm_pgshift: %u\n", arm_pgshift);
-			if(init_tfp0() == KERN_SUCCESS) {
-				printf("tfp0: 0x%" PRIx32 "\n", tfp0);
-				if((kbase = get_kbase(&kslide))) {
-					printf("kbase: " KADDR_FMT "\n", kbase);
-					printf("kslide: " KADDR_FMT "\n", kslide);
-					if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
-						if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
-							dimentio(nonce);
-							if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
-								entangle_nonce(nonce, key);
-							}
+		if(init_tfp0() == KERN_SUCCESS) {
+			printf("tfp0: 0x%" PRIx32 "\n", tfp0);
+			if((kbase = get_kbase(&kslide))) {
+				printf("kbase: " KADDR_FMT "\n", kbase);
+				printf("kslide: " KADDR_FMT "\n", kslide);
+				if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
+					if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
+						dimentio(nonce);
+						if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
+							entangle_nonce(nonce, key);
 						}
-						pfinder_term(&pfinder);
 					}
+					pfinder_term(&pfinder);
 				}
-				mach_port_deallocate(mach_task_self(), tfp0);
 			}
+			mach_port_deallocate(mach_task_self(), tfp0);
 		}
 	} else {
 		printf("Usage: %s nonce [key_8a3]\n", argv[0]);
