@@ -2,7 +2,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
-#include <sys/sysctl.h>
 
 #define PROC_TASK_OFF (0x10)
 #define OS_STRING_STRING_OFF (0x10)
@@ -23,7 +22,7 @@
 #define PROC_P_PID_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b2 ? 0x68 : 0x60)
 #define TASK_ITK_REGISTERED_OFF (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b1 ? 0x308 : 0x2E8)
 
-#define KADDR_FMT "0x%" PRIx64
+#define KADDR_FMT "0x%" PRIX64
 #define VM_KERN_MEMORY_CPU (9)
 #define RD(a) extract32(a, 0, 5)
 #define RN(a) extract32(a, 5, 5)
@@ -134,7 +133,7 @@ init_tfp0(void) {
 	if(ret != KERN_SUCCESS) {
 		host = mach_host_self();
 		if(MACH_PORT_VALID(host)) {
-			printf("host: 0x%" PRIx32 "\n", host);
+			printf("host: 0x%" PRIX32 "\n", host);
 			ret = host_get_special_port(host, HOST_LOCAL_NODE, 4, &tfp0);
 			mach_port_deallocate(mach_task_self(), host);
 		}
@@ -169,7 +168,7 @@ static void *
 kread_buf_alloc(kaddr_t addr, mach_vm_size_t read_sz) {
 	void *buf = malloc(read_sz);
 
-	if(buf) {
+	if(buf != NULL) {
 		if(kread_buf(addr, buf, read_sz) == KERN_SUCCESS) {
 			return buf;
 		}
@@ -274,19 +273,19 @@ pfinder_init(pfinder_t *pfinder, kaddr_t kbase) {
 		sgp = (const struct segment_command_64 *)ptr;
 		for(i = 0; i < mh64.ncmds; ++i) {
 			if(sgp->cmd == LC_SEGMENT_64) {
-				if(!strncmp(sgp->segname, SEG_TEXT_EXEC, sizeof(sgp->segname)) && (sp = find_section(sgp, SECT_TEXT))) {
+				if(!strncmp(sgp->segname, SEG_TEXT_EXEC, sizeof(sgp->segname)) && (sp = find_section(sgp, SECT_TEXT)) != NULL) {
 					pfinder->sec_text_start = sp->addr;
 					pfinder->sec_text_sz = sp->size;
-					printf("sec_text_start: " KADDR_FMT ", sec_text_sz: 0x%" PRIx64 "\n", pfinder->sec_text_start, pfinder->sec_text_sz);
-				} else if(!strncmp(sgp->segname, SEG_TEXT, sizeof(sgp->segname)) && (sp = find_section(sgp, SECT_CSTRING))) {
+					printf("sec_text_start: " KADDR_FMT ", sec_text_sz: 0x%" PRIX64 "\n", pfinder->sec_text_start, pfinder->sec_text_sz);
+				} else if(!strncmp(sgp->segname, SEG_TEXT, sizeof(sgp->segname)) && (sp = find_section(sgp, SECT_CSTRING)) != NULL) {
 					pfinder->sec_cstring_start = sp->addr;
 					pfinder->sec_cstring_sz = sp->size;
-					printf("sec_cstring_start: " KADDR_FMT ", sec_cstring_sz: 0x%" PRIx64 "\n", pfinder->sec_cstring_start, pfinder->sec_cstring_sz);
+					printf("sec_cstring_start: " KADDR_FMT ", sec_cstring_sz: 0x%" PRIX64 "\n", pfinder->sec_cstring_start, pfinder->sec_cstring_sz);
 				}
 			}
 			if(pfinder->sec_text_sz && pfinder->sec_cstring_sz) {
-				if((pfinder->sec_text = kread_buf_alloc(pfinder->sec_text_start, pfinder->sec_text_sz))) {
-					if((pfinder->sec_cstring = kread_buf_alloc(pfinder->sec_cstring_start, pfinder->sec_cstring_sz))) {
+				if((pfinder->sec_text = kread_buf_alloc(pfinder->sec_text_start, pfinder->sec_text_sz)) != NULL) {
+					if((pfinder->sec_cstring = kread_buf_alloc(pfinder->sec_cstring_start, pfinder->sec_cstring_sz)) != NULL) {
 						ret = KERN_SUCCESS;
 					} else {
 						free(pfinder->sec_text);
@@ -428,7 +427,7 @@ nonce_generate(io_service_t nonce_serv) {
 	io_connect_t nonce_conn;
 
 	if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS && MACH_PORT_VALID(nonce_conn)) {
-		printf("nonce_conn: 0x%" PRIx32 "\n", nonce_conn);
+		printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
 		ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
 		IOServiceClose(nonce_conn);
 	}
@@ -464,10 +463,10 @@ lookup_key_in_os_dict(kaddr_t os_dict, kaddr_t key) {
 	uint32_t i, os_dict_cnt;
 
 	if(kread_buf(os_dict + OS_DICTIONARY_COUNT_OFF, &os_dict_cnt, sizeof(os_dict_cnt)) == KERN_SUCCESS && os_dict_cnt) {
-		printf("os_dict_cnt: 0x%" PRIx32 "\n", os_dict_cnt);
+		printf("os_dict_cnt: 0x%" PRIX32 "\n", os_dict_cnt);
 		if(kread_addr(os_dict + OS_DICTIONARY_DICT_ENTRY_OFF, &os_dict_entry_ptr) == KERN_SUCCESS && os_dict_entry_ptr) {
 			printf("os_dict_entry_ptr: " KADDR_FMT "\n", os_dict_entry_ptr);
-			if((os_dict_entries = kread_buf_alloc(os_dict_entry_ptr, os_dict_cnt * sizeof(*os_dict_entries)))) {
+			if((os_dict_entries = kread_buf_alloc(os_dict_entry_ptr, os_dict_cnt * sizeof(*os_dict_entries))) != NULL) {
 				for(i = 0; i < os_dict_cnt; ++i) {
 					printf("key: " KADDR_FMT ", value: " KADDR_FMT "\n", os_dict_entries[i].key, os_dict_entries[i].value);
 					if(os_dict_entries[i].key == key) {
@@ -499,11 +498,11 @@ dimentio(uint64_t nonce) {
 	if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 		printf("our_task: " KADDR_FMT "\n", our_task);
 		if((nonce_serv = get_serv("AppleMobileApNonce")) != IO_OBJECT_NULL) {
-			printf("nonce_serv: 0x%" PRIx32 "\n", nonce_serv);
+			printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 			if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_boot_nonce_os_symbol(nonce_serv, &boot_nonce_os_symbol) == KERN_SUCCESS) {
 				printf("boot_nonce_os_symbol: " KADDR_FMT "\n", boot_nonce_os_symbol);
 				if((nvram_serv = get_serv("IODTNVRAM")) != IO_OBJECT_NULL) {
-					printf("nvram_serv: 0x%" PRIx32 "\n", nvram_serv);
+					printf("nvram_serv: 0x%" PRIX32 "\n", nvram_serv);
 					if(get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS) {
 						printf("of_dict: " KADDR_FMT "\n", of_dict);
 						if((os_string = lookup_key_in_os_dict(of_dict, boot_nonce_os_symbol))) {
@@ -512,7 +511,7 @@ dimentio(uint64_t nonce) {
 								printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 								snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
 								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
-									printf("Set nonce to 0x%016" PRIx64 "\n", nonce);
+									printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
 								}
 							}
 						}
@@ -535,7 +534,7 @@ entangle_nonce(uint64_t nonce, const void *key) {
 		CC_SHA384(dst, sizeof(dst), entangled_nonce);
 		printf("entangled_nonce: ");
 		for(i = 0; i < sizeof(entangled_nonce); ++i) {
-			printf("%02" PRIx8, entangled_nonce[i]);
+			printf("%02" PRIX8, entangled_nonce[i]);
 		}
 		putchar('\n');
 	}
@@ -550,14 +549,14 @@ main(int argc, char **argv) {
 
 	if(argc > 1 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
 		if(init_tfp0() == KERN_SUCCESS) {
-			printf("tfp0: 0x%" PRIx32 "\n", tfp0);
+			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 			if((kbase = get_kbase(&kslide))) {
 				printf("kbase: " KADDR_FMT "\n", kbase);
 				printf("kslide: " KADDR_FMT "\n", kslide);
 				if(pfinder_init(&pfinder, kbase) == KERN_SUCCESS) {
 					if(pfinder_init_offsets(pfinder) == KERN_SUCCESS) {
 						dimentio(nonce);
-						if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
+						if(argc == 3 && sscanf(argv[2], "0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
 							entangle_nonce(nonce, key);
 						}
 					}
