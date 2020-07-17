@@ -297,19 +297,6 @@ kread_buf(kaddr_t addr, void *buf, mach_vm_size_t sz) {
 	return KERN_SUCCESS;
 }
 
-static void *
-kread_buf_alloc(kaddr_t addr, mach_vm_size_t read_sz) {
-	void *buf = malloc(read_sz);
-
-	if(buf != NULL) {
-		if(kread_buf(addr, buf, read_sz) == KERN_SUCCESS) {
-			return buf;
-		}
-		free(buf);
-	}
-	return NULL;
-}
-
 static kern_return_t
 kread_addr(kaddr_t addr, kaddr_t *val) {
 	return kread_buf(addr, val, sizeof(*val));
@@ -551,7 +538,7 @@ pfinder_rtclock_data(pfinder_t pfinder) {
 	for(ref = pfinder_xref_str(pfinder, "assert_wait_timeout_with_leeway", 8); ref >= pfinder.sec_text.s64.addr && ref - pfinder.sec_text.s64.addr <= pfinder.sec_text.s64.size - sizeof(insns); ref -= sizeof(*insns)) {
 		memcpy(insns, pfinder.sec_text.data + (ref - pfinder.sec_text.s64.addr), sizeof(insns));
 		if(IS_ADRP(insns[0]) && IS_NOP(insns[1]) && IS_LDR_W_UNSIGNED_IMM(insns[2])) {
-			return pfinder_xref_rd(pfinder, RD(insns[0]), ref, 0);
+			return pfinder_xref_rd(pfinder, RD(insns[2]), ref, 0);
 		}
 	}
 	return 0;
@@ -704,13 +691,14 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 static kern_return_t
 nonce_generate(io_service_t nonce_serv) {
 	uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH];
-	size_t nonce_d_sz = sizeof(nonce_d);
 	kern_return_t ret = KERN_FAILURE;
 	io_connect_t nonce_conn;
+	size_t nonce_d_sz;
 
 	if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
 		printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
-		if(IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, 0) == KERN_SUCCESS) {
+		if(IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
+			nonce_d_sz = sizeof(nonce_d);
 			ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
 		}
 		IOServiceClose(nonce_conn);
@@ -733,45 +721,41 @@ static kaddr_t
 lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 	kaddr_t os_dict_entry_ptr, string_ptr, val = 0;
 	uint32_t os_dict_cnt, cur_key_len;
+	size_t key_len = strlen(key) + 1;
 	struct {
 		kaddr_t key, val;
-	} *os_dict_entries;
-	size_t i, key_len;
+	} os_dict_entry;
 	char *cur_key;
 
-	if(kread_buf(os_dict + OS_DICTIONARY_COUNT_OFF, &os_dict_cnt, sizeof(os_dict_cnt)) == KERN_SUCCESS && os_dict_cnt != 0) {
-		printf("os_dict_cnt: 0x%" PRIX32 "\n", os_dict_cnt);
+	if((cur_key = malloc(key_len)) != NULL) {
 		if(kread_addr(os_dict + OS_DICTIONARY_DICT_ENTRY_OFF, &os_dict_entry_ptr) == KERN_SUCCESS && os_dict_entry_ptr != 0) {
 			printf("os_dict_entry_ptr: " KADDR_FMT "\n", os_dict_entry_ptr);
-			if((os_dict_entries = kread_buf_alloc(os_dict_entry_ptr, os_dict_cnt * sizeof(*os_dict_entries))) != NULL) {
-				key_len = strlen(key) + 1;
-				if((cur_key = malloc(key_len)) != NULL) {
-					i = os_dict_cnt - 1;
-					do {
-						if(kread_buf(os_dict_entries[i].key + OS_STRING_LEN_OFF, &cur_key_len, sizeof(cur_key_len)) != KERN_SUCCESS) {
+			if(kread_buf(os_dict + OS_DICTIONARY_COUNT_OFF, &os_dict_cnt, sizeof(os_dict_cnt)) == KERN_SUCCESS) {
+				printf("os_dict_cnt: 0x%" PRIX32 "\n", os_dict_cnt);
+				while(os_dict_cnt-- != 0 && kread_buf(os_dict_entry_ptr + os_dict_cnt * sizeof(os_dict_entry), &os_dict_entry, sizeof(os_dict_entry)) == KERN_SUCCESS) {
+					printf("key: " KADDR_FMT ", val: " KADDR_FMT "\n", os_dict_entry.key, os_dict_entry.val);
+					if(kread_buf(os_dict_entry.key + OS_STRING_LEN_OFF, &cur_key_len, sizeof(cur_key_len)) != KERN_SUCCESS) {
+						break;
+					}
+					cur_key_len = OS_STRING_LEN(cur_key_len);
+					printf("cur_key_len: 0x%" PRIX32 "\n", cur_key_len);
+					if(cur_key_len == key_len) {
+						if(kread_addr(os_dict_entry.key + OS_STRING_STRING_OFF, &string_ptr) != KERN_SUCCESS || string_ptr == 0) {
 							break;
 						}
-						cur_key_len = OS_STRING_LEN(cur_key_len);
-						printf("cur_key_len: 0x%" PRIX32 "\n", cur_key_len);
-						if(cur_key_len == key_len) {
-							if(kread_addr(os_dict_entries[i].key + OS_STRING_STRING_OFF, &string_ptr) != KERN_SUCCESS || string_ptr == 0) {
-								break;
-							}
-							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-							if(kread_buf(string_ptr, cur_key, key_len) != KERN_SUCCESS) {
-								break;
-							}
-							if(strncmp(cur_key, key, key_len) == 0) {
-								val = os_dict_entries[i].val;
-								break;
-							}
+						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
+						if(kread_buf(string_ptr, cur_key, key_len) != KERN_SUCCESS) {
+							break;
 						}
-					} while(i-- != 0);
-					free(cur_key);
+						if(memcmp(cur_key, key, key_len) == 0) {
+							val = os_dict_entry.val;
+							break;
+						}
+					}
 				}
-				free(os_dict_entries);
 			}
 		}
+		free(cur_key);
 	}
 	return val;
 }
@@ -819,13 +803,13 @@ dimentio(uint64_t nonce) {
 static void
 entangle_nonce(uint64_t nonce, const void *key) {
 	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
-	uint64_t src[] = { 0, nonce }, dst[2];
+	uint64_t buf[] = { 0, nonce };
 	size_t i, out_sz;
 
-	if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key, kCCKeySizeAES128, NULL, src, sizeof(src), dst, sizeof(dst), &out_sz) == kCCSuccess && out_sz == sizeof(dst)) {
-		CC_SHA384(dst, sizeof(dst), entangled_nonce);
+	if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
+		CC_SHA384(buf, sizeof(buf), entangled_nonce);
 		printf("entangled_nonce: ");
-		for(i = 0; i < sizeof(entangled_nonce); ++i) {
+		for(i = 0; i < MIN(sizeof(entangled_nonce), 32); ++i) {
 			printf("%02" PRIX8, entangled_nonce[i]);
 		}
 		putchar('\n');
@@ -837,18 +821,16 @@ main(int argc, char **argv) {
 	uint32_t key[4];
 	uint64_t nonce;
 
-	if(argc >= 2 && sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-		if(init_tfp0() == KERN_SUCCESS) {
-			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
-			if(pfinder_init_offsets() == KERN_SUCCESS) {
-				dimentio(nonce);
-				if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
-					entangle_nonce(nonce, key);
-				}
-			}
-			mach_port_deallocate(mach_task_self(), tfp0);
-		}
-	} else {
+	if(argc != 2 && argc != 3) {
 		printf("Usage: %s nonce [key_8A3]\n", argv[0]);
+	} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1 && init_tfp0() == KERN_SUCCESS) {
+		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
+		if(pfinder_init_offsets() == KERN_SUCCESS) {
+			dimentio(nonce);
+			if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
+				entangle_nonce(nonce, key);
+			}
+		}
+		mach_port_deallocate(mach_task_self(), tfp0);
 	}
 }
