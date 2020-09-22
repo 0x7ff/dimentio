@@ -35,7 +35,6 @@
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define PROC_P_LIST_LH_FIRST_OFF (0x0)
-#define IO_DT_NVRAM_OF_DICT_OFF (0xC0)
 #define IPC_SPACE_IS_TABLE_SZ_OFF (0x14)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
 #define OS_STRING_LEN(a) extract32(a, 14, 18)
@@ -146,7 +145,7 @@ extern const mach_port_t kIOMasterPortDefault;
 
 static kaddr_t kernproc, our_task;
 static task_t tfp0 = MACH_PORT_NULL;
-static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, cpu_data_rtclock_datap_off;
+static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off, cpu_data_rtclock_datap_off;
 
 static uint32_t
 extract32(uint32_t val, unsigned start, unsigned len) {
@@ -628,6 +627,7 @@ pfinder_init_offsets(void) {
 	proc_task_off = 0x18;
 	proc_p_pid_off = 0x10;
 	task_itk_space_off = 0x290;
+	io_dt_nvram_of_dict_off = 0xC0;
 	cpu_data_rtclock_datap_off = 0x1D8;
 	if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_10_0_b5) {
 		task_itk_space_off = 0x300;
@@ -649,6 +649,7 @@ pfinder_init_offsets(void) {
 						proc_p_pid_off = 0x68;
 						if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
 							task_itk_space_off = 0x330;
+							io_dt_nvram_of_dict_off = 0xB8;
 						}
 					}
 				}
@@ -736,7 +737,7 @@ get_of_dict(io_service_t nvram_serv, kaddr_t *of_dict) {
 
 	if(lookup_io_object(nvram_serv, &nvram_object) == KERN_SUCCESS) {
 		printf("nvram_object: " KADDR_FMT "\n", nvram_object);
-		return kread_addr(nvram_object + IO_DT_NVRAM_OF_DICT_OFF, of_dict);
+		return kread_addr(nvram_object + io_dt_nvram_of_dict_off, of_dict);
 	}
 	return KERN_FAILURE;
 }
