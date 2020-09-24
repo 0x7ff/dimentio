@@ -629,7 +629,7 @@ static const char
 		fseek(fp, 0, SEEK_SET);
 		char *active = (char *)calloc(strLen, sizeof(char));
 		fread(active, sizeof(char), strLen, fp);
-		pclose(fp);
+		fclose(fp);
 		char *path = (char *)calloc(strLen + 74, sizeof(char));
 		sprintf(path, "/private/preboot/%s/System/Library/Caches/com.apple.kernelcaches/kernelcache", active);
 		free(active);
