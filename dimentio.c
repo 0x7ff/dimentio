@@ -46,7 +46,6 @@
 #define kCFCoreFoundationVersionNumber_iOS_11_0_b1 (1429.15)
 #define kCFCoreFoundationVersionNumber_iOS_12_0_b1 (1535.13)
 #define kCFCoreFoundationVersionNumber_iOS_13_0_b1 (1652.20)
-#define BOOT_PATH "/System/Library/Caches/com.apple.kernelcaches/kernelcache"
 
 #define DER_INT (0x2U)
 #define DER_SEQ (0x30U)
@@ -619,6 +618,25 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	return KERN_FAILURE;
 }
 
+static const char
+*boot_path() {
+    if(kCFCoreFoundationVersionNumber < kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
+        return "/System/Library/Caches/com.apple.kernelcaches/kernelcache";
+    } else {
+        FILE *fp=fopen("/private/preboot/active", "r");
+        fseek(fp, 0, SEEK_END);
+        unsigned long strLen = (unsigned long)ftell(fp) + 1;
+        fseek(fp, 0, SEEK_SET);
+        char *active = (char *)calloc(strLen, sizeof(char));
+        fread(active, sizeof(char), strLen, fp);
+        pclose(fp);
+        char *path = (char *)calloc(strLen + 74, sizeof(char));
+        sprintf(path, "/private/preboot/%s/System/Library/Caches/com.apple.kernelcaches/kernelcache", active);
+        free(active);
+        return path;
+    }
+}
+
 static kern_return_t
 pfinder_init_offsets(void) {
 	kern_return_t ret = KERN_FAILURE;
@@ -656,7 +674,7 @@ pfinder_init_offsets(void) {
 			}
 		}
 	}
-	if(pfinder_init_file(&pfinder, BOOT_PATH) == KERN_SUCCESS) {
+	if(pfinder_init_file(&pfinder, boot_path()) == KERN_SUCCESS) {
 		if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
 			printf("kernproc: " KADDR_FMT "\n", kernproc);
 			ret = KERN_SUCCESS;
