@@ -620,21 +620,21 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 
 static const char
 *boot_path() {
-    if(kCFCoreFoundationVersionNumber < kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
-        return "/System/Library/Caches/com.apple.kernelcaches/kernelcache";
-    } else {
-        FILE *fp=fopen("/private/preboot/active", "r");
-        fseek(fp, 0, SEEK_END);
-        unsigned long strLen = (unsigned long)ftell(fp) + 1;
-        fseek(fp, 0, SEEK_SET);
-        char *active = (char *)calloc(strLen, sizeof(char));
-        fread(active, sizeof(char), strLen, fp);
-        pclose(fp);
-        char *path = (char *)calloc(strLen + 74, sizeof(char));
-        sprintf(path, "/private/preboot/%s/System/Library/Caches/com.apple.kernelcaches/kernelcache", active);
-        free(active);
-        return path;
-    }
+	if(kCFCoreFoundationVersionNumber < kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
+		return "/System/Library/Caches/com.apple.kernelcaches/kernelcache";
+	} else {
+		FILE *fp=fopen("/private/preboot/active", "r");
+		fseek(fp, 0, SEEK_END);
+		unsigned long strLen = (unsigned long)ftell(fp) + 1;
+		fseek(fp, 0, SEEK_SET);
+		char *active = (char *)calloc(strLen, sizeof(char));
+		fread(active, sizeof(char), strLen, fp);
+		pclose(fp);
+		char *path = (char *)calloc(strLen + 74, sizeof(char));
+		sprintf(path, "/private/preboot/%s/System/Library/Caches/com.apple.kernelcaches/kernelcache", active);
+		free(active);
+		return path;
+	}
 }
 
 static kern_return_t
