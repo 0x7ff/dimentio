@@ -35,6 +35,7 @@
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define PROC_P_LIST_LH_FIRST_OFF (0x0)
+#define PREBOOT_PATH "/private/preboot/"
 #define IPC_SPACE_IS_TABLE_SZ_OFF (0x14)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
 #define OS_STRING_LEN(a) extract32(a, 14, 18)
@@ -402,7 +403,7 @@ pfinder_init_file(pfinder_t *pfinder, const char *filename) {
 
 	pfinder_reset(pfinder);
 	if((fd = open(filename, O_RDONLY | O_CLOEXEC)) != -1) {
-		if(fstat(fd, &stat_buf) != -1 && stat_buf.st_size > 0) {
+		if(fstat(fd, &stat_buf) != -1 && S_ISREG(stat_buf.st_mode) && stat_buf.st_size > 0) {
 			len = (size_t)stat_buf.st_size;
 			if((m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0)) != MAP_FAILED) {
 				if((pfinder->data = kdecompress(m, len, &pfinder->kernel_sz)) != NULL && pfinder->kernel_sz > sizeof(fh) + sizeof(mh64)) {
@@ -619,10 +620,44 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	return KERN_FAILURE;
 }
 
+static char *
+get_boot_path(void) {
+	int fd = open(PREBOOT_PATH "active", O_RDONLY | O_CLOEXEC);
+	size_t hash_len, path_len = sizeof(BOOT_PATH);
+	struct stat stat_buf;
+	char *path = NULL;
+	ssize_t n;
+
+	if(fd != -1) {
+		if(fstat(fd, &stat_buf) != -1 && S_ISREG(stat_buf.st_mode) && stat_buf.st_size > 0) {
+			hash_len = (size_t)stat_buf.st_size;
+			path_len += strlen(PREBOOT_PATH) + hash_len;
+			if((path = malloc(path_len)) != NULL) {
+				if((n = read(fd, path + strlen(PREBOOT_PATH), hash_len)) > 0 && (size_t)n == hash_len) {
+					memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
+				} else {
+					free(path);
+					path = NULL;
+				}
+			}
+		}
+		close(fd);
+	}
+	if(path == NULL) {
+		path_len = sizeof(BOOT_PATH);
+		path = malloc(path_len);
+	}
+	if(path != NULL) {
+		memcpy(path + (path_len - sizeof(BOOT_PATH)), BOOT_PATH, sizeof(BOOT_PATH));
+	}
+	return path;
+}
+
 static kern_return_t
 pfinder_init_offsets(void) {
 	kern_return_t ret = KERN_FAILURE;
 	pfinder_t pfinder;
+	char *boot_path;
 
 	proc_task_off = 0x18;
 	proc_p_pid_off = 0x10;
@@ -656,12 +691,16 @@ pfinder_init_offsets(void) {
 			}
 		}
 	}
-	if(pfinder_init_file(&pfinder, BOOT_PATH) == KERN_SUCCESS) {
-		if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
-			printf("kernproc: " KADDR_FMT "\n", kernproc);
-			ret = KERN_SUCCESS;
+	if((boot_path = get_boot_path()) != NULL) {
+		printf("boot_path: %s\n", boot_path);
+		if(pfinder_init_file(&pfinder, boot_path) == KERN_SUCCESS) {
+			if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
+				printf("kernproc: " KADDR_FMT "\n", kernproc);
+				ret = KERN_SUCCESS;
+			}
+			pfinder_term(&pfinder);
 		}
-		pfinder_term(&pfinder);
+		free(boot_path);
 	}
 	return ret;
 }
@@ -786,41 +825,66 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 }
 
 static kern_return_t
+set_nvram_prop(io_service_t nvram_serv, const char *key, const char *val) {
+	kern_return_t ret = KERN_FAILURE;
+	CFStringRef cf_key, cf_val;
+
+	if((cf_key = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, key, kCFStringEncodingUTF8, kCFAllocatorNull)) != NULL) {
+		if((cf_val = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, val, kCFStringEncodingUTF8, kCFAllocatorNull)) != NULL) {
+			ret = IORegistryEntrySetCFProperty(nvram_serv, cf_key, cf_val);
+			CFRelease(cf_val);
+		}
+		CFRelease(cf_key);
+	}
+	return ret;
+}
+
+static kern_return_t
 sync_nonce(io_service_t nvram_serv) {
-	if(IORegistryEntrySetCFProperty(nvram_serv, CFSTR("temp_key"), CFSTR("temp_val")) == KERN_SUCCESS && IORegistryEntrySetCFProperty(nvram_serv, CFSTR(kIONVRAMDeletePropertyKey), CFSTR("temp_key")) == KERN_SUCCESS) {
-		return IORegistryEntrySetCFProperty(nvram_serv, CFSTR(kIONVRAMForceSyncNowPropertyKey), CFSTR(kBootNoncePropertyKey));
+	if(set_nvram_prop(nvram_serv, "temp_key", "temp_val") == KERN_SUCCESS && set_nvram_prop(nvram_serv, kIONVRAMDeletePropertyKey, "temp_key") == KERN_SUCCESS) {
+		return set_nvram_prop(nvram_serv, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
 	}
 	return KERN_FAILURE;
 }
 
 static void
 dimentio(uint64_t nonce) {
+	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
 	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
-	io_service_t nonce_serv, nvram_serv;
+	kern_return_t ret = KERN_FAILURE;
 
-	if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
-		printf("our_task: " KADDR_FMT "\n", our_task);
-		if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
-			printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
-			if(nonce_generate(nonce_serv) == KERN_SUCCESS && (nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"))) != IO_OBJECT_NULL) {
-				printf("nvram_serv: 0x%" PRIX32 "\n", nvram_serv);
-				if(get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS && of_dict != 0) {
-					printf("of_dict: " KADDR_FMT "\n", of_dict);
-					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
-						printf("os_string: " KADDR_FMT "\n", os_string);
-						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
-							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
-							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
-								printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
+	if(nvram_serv != IO_OBJECT_NULL) {
+		printf("nvram_serv: 0x%" PRIX32 "\n", nvram_serv);
+		snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
+		if(set_nvram_prop(nvram_serv, kBootNoncePropertyKey, nonce_hex) == KERN_SUCCESS) {
+			ret = set_nvram_prop(nvram_serv, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
+		} else if(init_tfp0() == KERN_SUCCESS) {
+			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
+			if(pfinder_init_offsets() == KERN_SUCCESS && find_task(getpid(), &our_task) == KERN_SUCCESS) {
+				printf("our_task: " KADDR_FMT "\n", our_task);
+				if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
+					printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
+					if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+						printf("of_dict: " KADDR_FMT "\n", of_dict);
+						if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
+							printf("os_string: " KADDR_FMT "\n", os_string);
+							if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
+								printf("string_ptr: " KADDR_FMT "\n", string_ptr);
+								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS) {
+									ret = sync_nonce(nvram_serv);
+								}
 							}
 						}
 					}
+					IOObjectRelease(nonce_serv);
 				}
-				IOObjectRelease(nvram_serv);
 			}
-			IOObjectRelease(nonce_serv);
+			mach_port_deallocate(mach_task_self(), tfp0);
+		}
+		IOObjectRelease(nvram_serv);
+		if(ret == KERN_SUCCESS) {
+			printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
 		}
 	}
 }
@@ -848,14 +912,10 @@ main(int argc, char **argv) {
 
 	if(argc != 2 && argc != 3) {
 		printf("Usage: %s nonce [key_8A3]\n", argv[0]);
-	} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1 && init_tfp0() == KERN_SUCCESS) {
-		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
-		if(pfinder_init_offsets() == KERN_SUCCESS) {
-			dimentio(nonce);
-			if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
-				entangle_nonce(nonce, key);
-			}
+	} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
+		dimentio(nonce);
+		if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
+			entangle_nonce(nonce, key);
 		}
-		mach_port_deallocate(mach_task_self(), tfp0);
 	}
 }
