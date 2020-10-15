@@ -15,6 +15,7 @@
 #include <CommonCrypto/CommonCrypto.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <compression.h>
+#include <IOKit/IOKitLib.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -61,7 +62,6 @@
 #define IS_NOP(a) ((a) == 0xD503201FU)
 #define ADRP_ADDR(a) ((a) & ~0xFFFULL)
 #define ADRP_IMM(a) (ADR_IMM(a) << 12U)
-#define IO_OBJECT_NULL ((io_object_t)0)
 #define ADD_X_IMM(a) extract32(a, 10, 12)
 #define KCOMP_HDR_TYPE_LZSS (0x6C7A7373U)
 #define LDR_X_IMM(a) (sextract64(a, 5, 19) << 2U)
@@ -620,28 +620,69 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	return KERN_FAILURE;
 }
 
+static int
+sha1_to_str(const unsigned char *hash, size_t hashlen, char *buf, size_t buflen) {
+    if (buflen < (hashlen * 2 + 1)) {
+        return -1;
+    }
+
+    size_t i;
+    for (i = 0; i < hashlen; i++) {
+        sprintf(buf + i * 2, "%02X", hash[i]);
+    }
+    buf[i * 2] = 0;
+    return ERR_SUCCESS;
+}
+
 static char *
 get_boot_path(void) {
-	int fd = open(PREBOOT_PATH "active", O_RDONLY | O_CLOEXEC);
 	size_t hash_len, path_len = sizeof(BOOT_PATH);
-	struct stat stat_buf;
 	char *path = NULL;
-	ssize_t n;
 
-	if(fd != -1) {
-		if(fstat(fd, &stat_buf) != -1 && S_ISREG(stat_buf.st_mode) && stat_buf.st_size > 0) {
-			hash_len = (size_t)stat_buf.st_size;
-			path_len += strlen(PREBOOT_PATH) + hash_len;
-			if((path = malloc(path_len)) != NULL) {
-				if((n = read(fd, path + strlen(PREBOOT_PATH), hash_len)) > 0 && (size_t)n == hash_len) {
-					memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
-				} else {
-					free(path);
-					path = NULL;
-				}
-			}
-		}
-		close(fd);
+	if(access(BOOT_PATH, F_OK) != 0) {
+        io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/chosen");
+
+        if (!MACH_PORT_VALID(chosen)) {
+            printf("Unable to get IODeviceTree:/chosen port\n");
+            return NULL;
+        }
+
+        CFDataRef hash = (CFDataRef)IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, 0);
+
+        IOObjectRelease(chosen);
+
+        if (hash == nil) {
+            fprintf(stderr, "Unable to read boot-manifest-hash\n");
+            return NULL;
+        }
+
+        if (CFGetTypeID(hash) != CFDataGetTypeID()) {
+            fprintf(stderr, "Error hash is not data type\n");
+            CFRelease(hash);
+            return NULL;
+        }
+
+        // Make a hex string out of the hash
+
+        hash_len = (size_t)CFDataGetLength(hash) * 2;
+        char *manifestHash = (char*)calloc(hash_len + 1, sizeof(char));
+
+        int ret = sha1_to_str(CFDataGetBytePtr(hash), (size_t)CFDataGetLength(hash), manifestHash, hash_len + 1);
+
+        CFRelease(hash);
+
+        if (ret != ERR_SUCCESS) {
+            printf("Unable to generate bootHash string\n");
+            free(manifestHash);
+            return NULL;
+        }
+
+        path_len += strlen(PREBOOT_PATH) + hash_len;
+        if((path = malloc(path_len)) != NULL) {
+            strcpy(path, PREBOOT_PATH);
+            strcpy(path + strlen(PREBOOT_PATH), manifestHash);
+        }
+        free(manifestHash);
 	}
 	if(path == NULL) {
 		path_len = sizeof(BOOT_PATH);
