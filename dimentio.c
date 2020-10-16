@@ -847,6 +847,57 @@ sync_nonce(io_service_t nvram_serv) {
 	return KERN_FAILURE;
 }
 
+static kern_return_t
+entangle_nonce(uint64_t nonce) {
+#ifdef __arm64e__
+#	define IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF (0xD0)
+#	define IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF (0xD8)
+	io_service_t aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"));
+	struct {
+		uint32_t generated, key_id, key_sz, val[4], key[4], zero, pad;
+	} key;
+	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
+	kern_return_t ret = KERN_FAILURE;
+	uint64_t buf[] = { 0, nonce };
+	kaddr_t aes_object, keys_ptr;
+	uint32_t key_cnt;
+	size_t i, out_sz;
+
+	if(aes_serv != IO_OBJECT_NULL) {
+		printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
+		if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
+			printf("aes_object: " KADDR_FMT "\n", aes_object);
+			if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
+				printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
+				if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
+					printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
+					for(; key_cnt-- != 0 && kread_buf(keys_ptr, &key, sizeof(key)) == KERN_SUCCESS; keys_ptr += sizeof(key)) {
+						printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 "\n", key.generated, key.key_id, key.key_sz);
+						if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
+							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
+								CC_SHA384(buf, sizeof(buf), entangled_nonce);
+								printf("entangled_nonce: ");
+								for(i = 0; i < MIN(sizeof(entangled_nonce), 32); ++i) {
+									printf("%02" PRIX8, entangled_nonce[i]);
+								}
+								putchar('\n');
+								ret = KERN_SUCCESS;
+							}
+							break;
+						}
+					}
+				}
+			}
+		}
+		IOObjectRelease(aes_serv);
+	}
+	return ret;
+#else
+	(void)nonce;
+	return KERN_SUCCESS;
+#endif
+}
+
 static void
 dimentio(uint64_t nonce) {
 	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
@@ -871,8 +922,8 @@ dimentio(uint64_t nonce) {
 							printf("os_string: " KADDR_FMT "\n", os_string);
 							if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
 								printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS) {
-									ret = sync_nonce(nvram_serv);
+								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
+									ret = entangle_nonce(nonce);
 								}
 							}
 						}
@@ -889,33 +940,13 @@ dimentio(uint64_t nonce) {
 	}
 }
 
-static void
-entangle_nonce(uint64_t nonce, const void *key) {
-	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
-	uint64_t buf[] = { 0, nonce };
-	size_t i, out_sz;
-
-	if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
-		CC_SHA384(buf, sizeof(buf), entangled_nonce);
-		printf("entangled_nonce: ");
-		for(i = 0; i < MIN(sizeof(entangled_nonce), 32); ++i) {
-			printf("%02" PRIX8, entangled_nonce[i]);
-		}
-		putchar('\n');
-	}
-}
-
 int
 main(int argc, char **argv) {
-	uint32_t key[4];
 	uint64_t nonce;
 
-	if(argc != 2 && argc != 3) {
-		printf("Usage: %s nonce [key_8A3]\n", argv[0]);
+	if(argc != 2) {
+		printf("Usage: %s nonce\n", argv[0]);
 	} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
 		dimentio(nonce);
-		if(argc == 3 && sscanf(argv[2], "0x%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32, &(key[0]), &(key[1]), &(key[2]), &(key[3])) == 4) {
-			entangle_nonce(nonce, key);
-		}
 	}
 }
