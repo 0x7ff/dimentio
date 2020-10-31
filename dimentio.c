@@ -952,13 +952,62 @@ dimentio(uint64_t nonce) {
 	}
 }
 
+static void
+undimentio() {
+	uint64_t nonce = 0;
+	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
+	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
+	kaddr_t of_dict, os_string, string_ptr;
+
+	if(init_tfp0() == KERN_SUCCESS) {
+		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
+		if(pfinder_init_offsets() == KERN_SUCCESS && find_task(getpid(), &our_task) == KERN_SUCCESS) {
+			printf("our_task: " KADDR_FMT "\n", our_task);
+			if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
+				printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
+				if(get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+					printf("of_dict: " KADDR_FMT "\n", of_dict);
+					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
+						printf("os_string: " KADDR_FMT "\n", os_string);
+						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
+							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
+							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
+							if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
+								printf("generator: %s\n", nonce_hex);
+								sscanf(nonce_hex, "0x%016" PRIx64, &nonce);
+							}
+						}
+					}
+				}
+				IOObjectRelease(nonce_serv);
+			}
+		}
+		mach_port_deallocate(mach_task_self(), tfp0);
+	}
+	IOObjectRelease(nvram_serv);
+}
+
+void show_help() {
+	printf("Usage: dimentio <get|nonce>\n\n");
+	printf("Example:\n");
+	printf("set generator: dimentio 0x1111111111111111\n");
+	printf("get generator: dimentio get\n");
+}
+
 int
 main(int argc, char **argv) {
+
 	uint64_t nonce;
 
-	if(argc != 2) {
-		printf("Usage: %s nonce\n", argv[0]);
-	} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-		dimentio(nonce);
+	if(argc == 2) {
+		if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
+			dimentio(nonce);
+		} else if (strcmp(argv[1], "get") == 0) {
+			undimentio();
+		} else {
+			show_help();
+		}
+	} else {
+		show_help();
 	}
 }
