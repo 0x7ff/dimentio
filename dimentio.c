@@ -49,6 +49,7 @@
 #define kCFCoreFoundationVersionNumber_iOS_11_0_b1 (1429.15)
 #define kCFCoreFoundationVersionNumber_iOS_12_0_b1 (1535.13)
 #define kCFCoreFoundationVersionNumber_iOS_13_0_b1 (1652.20)
+#define kCFCoreFoundationVersionNumber_iOS_14_3_b1 (1770.300)
 #define BOOT_PATH "/System/Library/Caches/com.apple.kernelcaches/kernelcache"
 
 #define DER_INT (0x2U)
@@ -645,22 +646,20 @@ get_boot_path(void) {
 	CFDataRef hash_cf;
 	char *path = NULL;
 
-	if(stat(PREBOOT_PATH, &stat_buf) != -1 && S_ISDIR(stat_buf.st_mode)) {
-		if((chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen")) != IO_OBJECT_NULL) {
-			if((hash_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, kNilOptions)) != NULL) {
-				if(CFGetTypeID(hash_cf) == CFDataGetTypeID() && (hash_len = (size_t)CFDataGetLength(hash_cf) << 1U) != 0) {
-					path_len += strlen(PREBOOT_PATH) + hash_len;
-					if((path = malloc(path_len)) != NULL) {
-						memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
-						for(hash = CFDataGetBytePtr(hash_cf); hash_len-- != 0; ) {
-							path[strlen(PREBOOT_PATH) + hash_len] = "0123456789ABCDEF"[(hash[hash_len >> 1U] >> ((~hash_len & 1U) << 2U)) & 0xFU];
-						}
+	if(stat(PREBOOT_PATH, &stat_buf) != -1 && S_ISDIR(stat_buf.st_mode) && (chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen")) != IO_OBJECT_NULL) {
+		if((hash_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, kNilOptions)) != NULL) {
+			if(CFGetTypeID(hash_cf) == CFDataGetTypeID() && (hash_len = (size_t)CFDataGetLength(hash_cf) << 1U) != 0) {
+				path_len += strlen(PREBOOT_PATH) + hash_len;
+				if((path = malloc(path_len)) != NULL) {
+					memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
+					for(hash = CFDataGetBytePtr(hash_cf); hash_len-- != 0; ) {
+						path[strlen(PREBOOT_PATH) + hash_len] = "0123456789ABCDEF"[(hash[hash_len >> 1U] >> ((~hash_len & 1U) << 2U)) & 0xFU];
 					}
 				}
-				CFRelease(hash_cf);
 			}
-			IOObjectRelease(chosen);
+			CFRelease(hash_cf);
 		}
+		IOObjectRelease(chosen);
 	}
 	if(path == NULL) {
 		path_len = sizeof(BOOT_PATH);
@@ -697,6 +696,9 @@ pfinder_init_offsets(void) {
 						if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
 							task_itk_space_off = 0x330;
 							io_dt_nvram_of_dict_off = 0xB8;
+							if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_3_b1) {
+								io_dt_nvram_of_dict_off = 0xC0;
+							}
 						}
 					}
 				}
