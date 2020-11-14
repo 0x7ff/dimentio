@@ -94,9 +94,6 @@
 #	define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
-uint64_t nonce;
-uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
-
 typedef uint64_t kaddr_t;
 typedef char io_string_t[512];
 typedef mach_port_t io_object_t;
@@ -864,8 +861,7 @@ sync_nonce(io_service_t nvram_serv) {
 }
 
 static kern_return_t
-entangle_nonce(uint64_t nonce) {
-#ifdef __arm64e__
+entangle_nonce(uint64_t nonce, uint8_t *entangled_nonce) {
 #	define IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF (0xD0)
 #	define IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF (0xD8)
 	io_service_t aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"));
@@ -892,7 +888,7 @@ entangle_nonce(uint64_t nonce) {
 							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
 								CC_SHA384(buf, sizeof(buf), entangled_nonce);
 								printf("entangled_nonce: ");
-								for(i = 0; i < MIN(sizeof(entangled_nonce), 32); ++i) {
+								for(i = 0; i < MIN(CC_SHA384_DIGEST_LENGTH, 32); ++i) {
 									printf("%02" PRIX8, entangled_nonce[i]);
 								}
 								putchar('\n');
@@ -907,14 +903,10 @@ entangle_nonce(uint64_t nonce) {
 		IOObjectRelease(aes_serv);
 	}
 	return ret;
-#else
-	(void)nonce;
-	return KERN_SUCCESS;
-#endif
 }
 
 kern_return_t
-dimentio(uint64_t nonce) {
+dimentio(uint64_t nonce, uint8_t *entangled_nonce) {
 	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
 	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
@@ -938,7 +930,7 @@ dimentio(uint64_t nonce) {
 							if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
 								printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 								if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
-									ret = entangle_nonce(nonce);
+									ret = entangle_nonce(nonce, entangled_nonce);
 								}
 							}
 						}
@@ -953,78 +945,71 @@ dimentio(uint64_t nonce) {
 	return ret;
 }
 
-kern_return_t undimentio() {
-	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
+kern_return_t undimentio(uint64_t *generator) {
+	io_service_t nonce_serv = 0, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
 	char nonce_hex[2 * 8 + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
 	kern_return_t ret = KERN_FAILURE;
-	
+
 	ret = init_tfp0();
 	if (ret != KERN_SUCCESS) return ret;
-	
-	// should dealloc tfp0 from this point
-    
-    printf("tfp0: 0x%" PRIX32 "\n", tfp0);
-    
-    ret = pfinder_init_offsets();
-    if (ret != KERN_SUCCESS) goto error;
-    
-    ret = find_task(getpid(), &our_task);
-    if (ret != KERN_SUCCESS) goto error;
-    printf("our_task: " KADDR_FMT "\n", our_task);
 
-    // ??
-    if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) == IO_OBJECT_NULL) {
-        IOObjectRelease(nonce_serv);
-        ret = KERN_FAILURE;
-        goto error;
-    }
-    printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
+	printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 
-    ret = get_of_dict(nvram_serv, &of_dict);
-    if (ret != KERN_SUCCESS) goto error;
+	ret = pfinder_init_offsets();
+	if (ret != KERN_SUCCESS) goto error;
 
-    // ??
-    if(of_dict == 0) {
-        ret = KERN_FAILURE;
-        goto error;
-    }
-    printf("of_dict: " KADDR_FMT "\n", of_dict);
+	ret = find_task(getpid(), &our_task);
+	if (ret != KERN_SUCCESS) goto error;
+	printf("our_task: " KADDR_FMT "\n", our_task);
 
-    // ??
-    if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) == 0) {
-        ret = KERN_FAILURE;
-        goto error;
-    }
-    printf("os_string: " KADDR_FMT "\n", os_string);
+	if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) == IO_OBJECT_NULL) {
+			ret = KERN_FAILURE;
+			goto error;
+	}
+	printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 
-    ret = kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr);
-    if (ret != KERN_SUCCESS) goto error;
-    
-    // ??
-    if (string_ptr == 0) {
-        ret = KERN_FAILURE;
-        goto error;
-    }
-    printf("string_ptr: " KADDR_FMT "\n", string_ptr);
+	ret = get_of_dict(nvram_serv, &of_dict);
+	if (ret != KERN_SUCCESS) goto error;
 
-    snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
+	if(of_dict == 0) {
+			ret = KERN_FAILURE;
+			goto error;
+	}
+	printf("of_dict: " KADDR_FMT "\n", of_dict);
 
+	if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) == 0) {
+			ret = KERN_FAILURE;
+			goto error;
+	}
+	printf("os_string: " KADDR_FMT "\n", os_string);
 
-    ret = kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex));
-    if (ret != KERN_SUCCESS) goto error;
-    
-    ret = sync_nonce(nvram_serv);
-    if (ret != KERN_SUCCESS) goto error;
+	ret = kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr);
+	if (ret != KERN_SUCCESS) goto error;
 
-    printf("generator: %s\n", nonce_hex);
-    sscanf(nonce_hex, "0x%016" PRIx64, &nonce);
+	if (string_ptr == 0) {
+			ret = KERN_FAILURE;
+			goto error;
+	}
+	printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 
-    IOObjectRelease(nonce_serv);
+	snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, *generator);
 
-	IOObjectRelease(nvram_serv);
-	return ret;
+	ret = kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex));
+	if (ret != KERN_SUCCESS) goto error;
+
+	ret = sync_nonce(nvram_serv);
+	if (ret != KERN_SUCCESS) goto error;
+
+	sscanf(nonce_hex, "0x%016" PRIx64, generator);
+
 error:
-    mach_port_deallocate(mach_task_self(), tfp0);
-    return ret;
+	if (nonce_serv != IO_OBJECT_NULL) {
+		IOObjectRelease(nonce_serv);
+	}
+	if (nvram_serv != IO_OBJECT_NULL) {
+		IOObjectRelease(nvram_serv);
+	}
+	mach_port_deallocate(mach_task_self(), tfp0);
+	return ret;
 }

@@ -25,7 +25,14 @@ void show_help() {
 	printf("get generator: dimentio get\n");
 }
 
+#ifndef MIN
+#	define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
 int main(int argc, char **argv) {
+	uint64_t nonce;
+	kern_return_t ret;
+	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
 
 	if (argc != 2) {
 		show_help();
@@ -33,14 +40,23 @@ int main(int argc, char **argv) {
 	}
 
 	if (sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-		if (dimentio(nonce) == KERN_SUCCESS) {
+		ret = dimentio(nonce, entangled_nonce);
+		if (ret == KERN_SUCCESS) {
 			printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
+			printf("entangled_nonce: ");
+			for(int i = 0; i < MIN(CC_SHA384_DIGEST_LENGTH, 32); ++i) {
+				printf("%02" PRIX8, entangled_nonce[i]);
+			}
+			putchar('\n');
 		} else {
 			printf("Failed to set nonce.\n");
 		}
 	} else if (strcmp(argv[1], "get") == 0) {
-		if (undimentio() != KERN_SUCCESS) {
-			printf("Failed to get nonce.\n");
+		ret = undimentio(&nonce);
+		if (ret == KERN_SUCCESS) {
+			printf("generator: 0x%016" PRIx64 "\n", nonce);
+		} else {
+			printf("Failed to get generator.\n");
 		}
 	} else {
 		show_help();
