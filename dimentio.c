@@ -27,19 +27,20 @@ void show_help() {
 
 int main(int argc, char **argv) {
 
-	if(argc == 2) {
-		if (sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-			if (dimentio(nonce) == KERN_SUCCESS) {
-				printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
-			} else {
-				printf("Failed to set nonce.\n");
-			}
-		} else if (strcmp(argv[1], "get") == 0) {
-			if (undimentio() != KERN_SUCCESS) {
-				printf("Failed to get nonce.\n");
-			}
+	if (argc != 2) {
+		show_help();
+		return 0;
+	}
+
+	if (sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
+		if (dimentio(nonce) == KERN_SUCCESS) {
+			printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
 		} else {
-			show_help();
+			printf("Failed to set nonce.\n");
+		}
+	} else if (strcmp(argv[1], "get") == 0) {
+		if (undimentio() != KERN_SUCCESS) {
+			printf("Failed to get nonce.\n");
 		}
 	} else {
 		show_help();
