@@ -165,3 +165,5 @@ obj
 
 # End of https://www.toptal.com/developers/gitignore/api/c,c++,objective-c,theos-tweak,visualstudiocode
 
+dimentio
+dimentio-static

@@ -1,36 +1,36 @@
-include $(THEOS)/makefiles/common.mk
+CC      ?= clang
+CFLAGS  ?= -O2 -isysroot $$(xcrun -sdk iphoneos --show-sdk-path) -arch arm64 -mios-version-min=10.0 -Weverything
+LDFLAGS ?=
 
-ARCHS = arm64
+LIBTOOL  ?= libtool
+LDID     ?= ldid
 
-ifeq ($(THEOS_LINKAGE_TYPE),dynamic)
-SOVERSION = .0
-else
-SOVERSION =
-endif
+SOVERSION := 1
+LIBS      := -framework IOKit -framework CoreFoundation -lcompression
 
-LIBRARY_NAME = libdimentio$(SOVERSION)
-libdimentio$(SOVERSION)_FILES = libdimentio.c
-libdimentio$(SOVERSION)_CFLAGS = -D__arm64e__
-libdimentio$(SOVERSION)_FRAMEWORKS = IOKit
+all: libdimentio.$(SOVERSION).dylib libdimentio.a dimentio dimentio-static
 
-TOOL_NAME = dimentio
-dimentio_FILES = dimentio.c
-dimentio_LDFLAGS = -L$(THEOS_OBJ_DIR)
-dimentio_CODESIGN_FLAGS = -Stfp0.plist
-dimentio_LIBRARIES = dimentio$(SOVERSION)
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ -x c $<
 
-ifeq ($(THEOS_LINKAGE_TYPE),static) # No need to link twice if not a static build!
-dimentio_FRAMEWORKS = IOKit
-endif
+libdimentio.$(SOVERSION).dylib: libdimentio.o
+	$(CC) $(CFLAGS) -dynamiclib -install_name "/usr/lib/$@" -o ./$@ ./libdimentio.o $(LDFLAGS) $(LIBS)
+	$(LDID) -S ./$@
 
-include $(THEOS_MAKE_PATH)/library.mk
-include $(THEOS_MAKE_PATH)/tool.mk
+libdimentio.a: libdimentio.o
+	$(LIBTOOL) -static -o ./$@ ./libdimentio.o
 
-# Ideally library and header files are split into debian-esque packages, but this will have to do for a theos build!
-after-stage::
-	mkdir -p $(THEOS_STAGING_DIR)/usr/include
-	cp $(THEOS_BUILD_DIR)/dimentio.h $(THEOS_STAGING_DIR)/usr/include
-	chmod u+s $(THEOS_STAGING_DIR)/usr/bin/dimentio
-ifeq ($(THEOS_LINKAGE_TYPE),dynamic)
-	ln -s dimentio$(SOVERSION).dylib $(THEOS_STAGING_DIR)/usr/lib/dimentio.dylib
-endif
+dimentio: dimentio.o libdimentio.$(SOVERSION).dylib
+	$(CC) $(CFLAGS) -o $@ ./dimentio.o $(LDFLAGS) ./libdimentio.$(SOVERSION).dylib
+	$(LDID) -Stfp0.plist ./$@
+	chmod u+s ./$@
+
+dimentio-static: dimentio.o libdimentio.a
+	$(CC) $(CFLAGS) -o $@ ./dimentio.o $(LDFLAGS) ./libdimentio.a $(LIBS)
+	$(LDID) -Stfp0.plist ./$@
+	chmod u+s ./$@
+
+clean:
+	$(RM) dimentio{,-static} *.a *.o *.dylib
+
+.PHONY: all clean

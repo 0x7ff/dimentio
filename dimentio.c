@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-void show_help() {
+static void show_help() {
 	printf("Usage: dimentio <get|nonce>\n\n");
 	printf("Example:\n");
 	printf("set generator: dimentio 0x1111111111111111\n");
