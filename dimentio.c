@@ -26,9 +26,9 @@ main(int argc, char **argv) {
 		printf("Usage: %s [nonce]\n", argv[0]);
 	} else if(dimentio_init(0, NULL, NULL) == KERN_SUCCESS) {
 		if(argc == 1) {
-			ret = dimentio(&nonce, false, entangled_nonce, &entangled);
+			ret = dementia(&nonce, entangled_nonce, &entangled);
 		} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-			ret = dimentio(&nonce, true, entangled_nonce, &entangled);
+			ret = dimentio(nonce, entangled_nonce, &entangled);
 		}
 		if(ret == KERN_SUCCESS) {
 			if(argc == 1) {
