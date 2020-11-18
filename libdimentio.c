@@ -68,8 +68,8 @@
 #define kOSBundleLoadAddressKey "OSBundleLoadAddress"
 #define IS_ADR(a) (((a) & 0x9F000000U) == 0x10000000U)
 #define IS_ADRP(a) (((a) & 0x9F000000U) == 0x90000000U)
-#define IS_ADD_X(a) (((a) & 0xFFC00000U) == 0x91000000U)
 #define IS_LDR_X(a) (((a) & 0xFF000000U) == 0x58000000U)
+#define IS_ADD_X(a) (((a) & 0xFFC00000U) == 0x91000000U)
 #define LDR_W_UNSIGNED_IMM(a) (extract32(a, 10, 12) << 2U)
 #define LDR_X_UNSIGNED_IMM(a) (extract32(a, 10, 12) << 3U)
 #define kBootNoncePropertyKey "com.apple.System.boot-nonce"
@@ -592,33 +592,35 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	CFArrayRef kext_names;
 	mach_vm_size_t sz;
 
-	if(pfinder->kslide == 0 && task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
-		pfinder->kslide = dyld_info.all_image_info_size;
-	}
 	if(pfinder->kslide == 0) {
-		cnt = VM_REGION_EXTENDED_INFO_COUNT;
-		for(addr = 0; mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &object_name) == KERN_SUCCESS; addr += sz) {
-			mach_port_deallocate(mach_task_self(), object_name);
-			if(extended_info.protection == VM_PROT_READ && extended_info.user_tag == VM_KERN_MEMORY_OSKEXT) {
-				if(kread_buf(addr + LOADED_KEXT_SUMMARY_HDR_NAME_OFF, kext_name, sizeof(kext_name)) == KERN_SUCCESS) {
-					printf("kext_name: %s\n", kext_name);
-					if(kread_addr(addr + LOADED_KEXT_SUMMARY_HDR_ADDR_OFF, &kext_addr_slid) == KERN_SUCCESS) {
-						printf("kext_addr_slid: " KADDR_FMT "\n", kext_addr_slid);
-						if((kext_name_cf = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, kext_name, kCFStringEncodingUTF8, kCFAllocatorNull)) != NULL) {
-							if((kext_names = CFArrayCreate(kCFAllocatorDefault, (const void **)&kext_name_cf, 1, &kCFTypeArrayCallBacks)) != NULL) {
-								if((kexts_info = OSKextCopyLoadedKextInfo(kext_names, NULL)) != NULL) {
-									if(CFGetTypeID(kexts_info) == CFDictionaryGetTypeID() && CFDictionaryGetCount(kexts_info) == 1 && (kext_info = CFDictionaryGetValue(kexts_info, kext_name_cf)) != NULL && CFGetTypeID(kext_info) == CFDictionaryGetTypeID() && (kext_addr_cf = CFDictionaryGetValue(kext_info, CFSTR(kOSBundleLoadAddressKey))) != NULL && CFGetTypeID(kext_addr_cf) == CFNumberGetTypeID() && CFNumberGetValue(kext_addr_cf, kCFNumberSInt64Type, &kext_addr) && kext_addr_slid > kext_addr) {
-										pfinder->kslide = kext_addr_slid - kext_addr;
+		if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
+			pfinder->kslide = dyld_info.all_image_info_size;
+		}
+		if(pfinder->kslide == 0) {
+			cnt = VM_REGION_EXTENDED_INFO_COUNT;
+			for(addr = 0; mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &object_name) == KERN_SUCCESS; addr += sz) {
+				mach_port_deallocate(mach_task_self(), object_name);
+				if(extended_info.protection == VM_PROT_READ && extended_info.user_tag == VM_KERN_MEMORY_OSKEXT) {
+					if(kread_buf(addr + LOADED_KEXT_SUMMARY_HDR_NAME_OFF, kext_name, sizeof(kext_name)) == KERN_SUCCESS) {
+						printf("kext_name: %s\n", kext_name);
+						if(kread_addr(addr + LOADED_KEXT_SUMMARY_HDR_ADDR_OFF, &kext_addr_slid) == KERN_SUCCESS) {
+							printf("kext_addr_slid: " KADDR_FMT "\n", kext_addr_slid);
+							if((kext_name_cf = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, kext_name, kCFStringEncodingUTF8, kCFAllocatorNull)) != NULL) {
+								if((kext_names = CFArrayCreate(kCFAllocatorDefault, (const void **)&kext_name_cf, 1, &kCFTypeArrayCallBacks)) != NULL) {
+									if((kexts_info = OSKextCopyLoadedKextInfo(kext_names, NULL)) != NULL) {
+										if(CFGetTypeID(kexts_info) == CFDictionaryGetTypeID() && CFDictionaryGetCount(kexts_info) == 1 && (kext_info = CFDictionaryGetValue(kexts_info, kext_name_cf)) != NULL && CFGetTypeID(kext_info) == CFDictionaryGetTypeID() && (kext_addr_cf = CFDictionaryGetValue(kext_info, CFSTR(kOSBundleLoadAddressKey))) != NULL && CFGetTypeID(kext_addr_cf) == CFNumberGetTypeID() && CFNumberGetValue(kext_addr_cf, kCFNumberSInt64Type, &kext_addr) && kext_addr_slid > kext_addr) {
+											pfinder->kslide = kext_addr_slid - kext_addr;
+										}
+										CFRelease(kexts_info);
 									}
-									CFRelease(kexts_info);
+									CFRelease(kext_names);
 								}
-								CFRelease(kext_names);
+								CFRelease(kext_name_cf);
 							}
-							CFRelease(kext_name_cf);
 						}
 					}
+					break;
 				}
-				break;
 			}
 		}
 	}
@@ -856,9 +858,9 @@ sync_nonce(io_service_t nvram_serv) {
 	return KERN_FAILURE;
 }
 
-static kern_return_t
+static bool
 entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH]) {
-	kern_return_t ret = KERN_FAILURE;
+	bool ret = false;
 #ifdef __arm64e__
 #	define IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF (0xD0)
 #	define IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF (0xD8)
@@ -884,7 +886,7 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 						if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
 							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
 								CC_SHA384(buf, sizeof(buf), entangled_nonce);
-								ret = KERN_SUCCESS;
+								ret = true;
 							}
 							break;
 						}
@@ -906,6 +908,7 @@ dimentio_term(void) {
 	if(tfp0 != TASK_NULL) {
 		mach_port_deallocate(mach_task_self(), tfp0);
 	}
+	setpriority(PRIO_PROCESS, 0, 0);
 }
 
 kern_return_t
@@ -916,10 +919,10 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 		kwrite_buf = _kwrite_buf;
 	} else if(init_tfp0() == KERN_SUCCESS) {
 		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
-		kread_buf = (_kread_buf != NULL) ? _kread_buf : kread_buf_tfp0;
-		kwrite_buf = (_kwrite_buf != NULL) ? _kwrite_buf : kwrite_buf_tfp0;
+		kread_buf = _kread_buf != NULL ? _kread_buf : kread_buf_tfp0;
+		kwrite_buf = _kwrite_buf != NULL ? _kwrite_buf : kwrite_buf_tfp0;
 	}
-	if(pfinder_init_offsets() == KERN_SUCCESS) {
+	if(setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1 && pfinder_init_offsets() == KERN_SUCCESS) {
 		return KERN_SUCCESS;
 	}
 	dimentio_term();
@@ -928,8 +931,8 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 
 kern_return_t
 dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
-	io_service_t nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
-	char nonce_hex[2 * sizeof(*nonce) + sizeof("0x")];
+	io_service_t nvram_serv = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
+	char nonce_hex[sizeof("0x") + 2 * sizeof(*nonce)];
 	kaddr_t of_dict, os_string, string_ptr;
 	kern_return_t ret = KERN_FAILURE;
 
@@ -945,7 +948,7 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 						if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
 							ret = KERN_SUCCESS;
-							*entangled = entangle_nonce(*nonce, entangled_nonce) == KERN_SUCCESS;
+							*entangled = entangle_nonce(*nonce, entangled_nonce);
 						}
 					}
 				}
@@ -958,8 +961,8 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 
 kern_return_t
 dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
-	io_service_t nonce_serv, nvram_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IODTNVRAM"));
-	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
+	io_service_t nonce_serv, nvram_serv = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
+	char nonce_hex[sizeof("0x") + 2 * sizeof(nonce)];
 	kaddr_t of_dict, os_string, string_ptr;
 	kern_return_t ret = KERN_FAILURE;
 
@@ -978,7 +981,7 @@ dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool 
 							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
 							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
 								ret = KERN_SUCCESS;
-								*entangled = entangle_nonce(nonce, entangled_nonce) == KERN_SUCCESS;
+								*entangled = entangle_nonce(nonce, entangled_nonce);
 							}
 						}
 					}

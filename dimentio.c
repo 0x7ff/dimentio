@@ -17,20 +17,14 @@
 int
 main(int argc, char **argv) {
 	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
-	kern_return_t ret = KERN_FAILURE;
 	bool entangled = false;
-	uint64_t nonce;
+	uint64_t nonce = 0;
 	size_t i;
 
 	if(argc != 1 && argc != 2) {
 		printf("Usage: %s [nonce]\n", argv[0]);
-	} else if(dimentio_init(0, NULL, NULL) == KERN_SUCCESS) {
-		if(argc == 1) {
-			ret = dementia(&nonce, entangled_nonce, &entangled);
-		} else if(sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) {
-			ret = dimentio(nonce, entangled_nonce, &entangled);
-		}
-		if(ret == KERN_SUCCESS) {
+	} else if((argc == 1 || sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) && dimentio_init(0, NULL, NULL) == KERN_SUCCESS) {
+		if((argc == 1 ? dementia(&nonce, entangled_nonce, &entangled) : dimentio(nonce, entangled_nonce, &entangled)) == KERN_SUCCESS) {
 			if(argc == 1) {
 				printf("Current nonce is 0x%016" PRIX64 "\n", nonce);
 			} else {
