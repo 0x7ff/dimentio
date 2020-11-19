@@ -17,8 +17,8 @@
 int
 main(int argc, char **argv) {
 	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
-	bool entangled = false;
 	uint64_t nonce = 0;
+	bool entangled;
 	size_t i;
 
 	if(argc != 1 && argc != 2) {

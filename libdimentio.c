@@ -19,6 +19,7 @@
 #include <mach-o/nlist.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 
 #define LZSS_F (18)
 #define LZSS_N (4096)
@@ -54,6 +55,7 @@
 #define DER_SEQ (0x30U)
 #define DER_IA5_STR (0x16U)
 #define DER_OCTET_STR (0x4U)
+#define PROC_PIDREGIONINFO (7)
 #define RD(a) extract32(a, 0, 5)
 #define RN(a) extract32(a, 5, 5)
 #define VM_KERN_MEMORY_OSKEXT (5)
@@ -106,6 +108,13 @@ typedef struct {
 	char *data;
 } pfinder_t;
 
+typedef struct {
+	uint32_t pri_protection, pri_max_protection, pri_inheritance, pri_flags;
+	uint64_t pri_offset;
+	uint32_t pri_behavior, pri_user_wired_count, pri_user_tag, pri_pages_resident, pri_pages_shared_now_private, pri_pages_swapped_out, pri_pages_dirtied, pri_ref_count, pri_shadow_depth, pri_share_mode, pri_private_pages_resident, pri_shared_pages_resident, pri_obj_id, pri_depth;
+	uint64_t pri_address, pri_size;
+} proc_regioninfo_data_t;
+
 kern_return_t
 IOServiceClose(io_connect_t);
 
@@ -114,6 +123,9 @@ IOObjectRelease(io_object_t);
 
 CFMutableDictionaryRef
 IOServiceMatching(const char *);
+
+int
+proc_pidinfo(int, int, uint64_t, void *, int);
 
 CFDictionaryRef
 OSKextCopyLoadedKextInfo(CFArrayRef, CFArrayRef);
@@ -144,9 +156,6 @@ mach_vm_read_overwrite(vm_map_t, mach_vm_address_t, mach_vm_size_t, mach_vm_addr
 
 kern_return_t
 mach_vm_machine_attribute(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_machine_attribute_t, vm_machine_attribute_val_t *);
-
-kern_return_t
-mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
 
 extern const mach_port_t kIOMasterPortDefault;
 
@@ -580,27 +589,24 @@ pfinder_kernproc(pfinder_t pfinder) {
 static kaddr_t
 pfinder_init_kbase(pfinder_t *pfinder) {
 	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
-	vm_region_extended_info_data_t extended_info;
 	kaddr_t addr, kext_addr, kext_addr_slid;
 	CFDictionaryRef kexts_info, kext_info;
 	task_dyld_info_data_t dyld_info;
 	char kext_name[KMOD_MAX_NAME];
+	proc_regioninfo_data_t pri;
 	struct mach_header_64 mh64;
 	CFStringRef kext_name_cf;
 	CFNumberRef kext_addr_cf;
-	mach_port_t object_name;
 	CFArrayRef kext_names;
-	mach_vm_size_t sz;
 
 	if(pfinder->kslide == 0) {
-		if(task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
+		if(tfp0 != TASK_NULL && task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
 			pfinder->kslide = dyld_info.all_image_info_size;
 		}
 		if(pfinder->kslide == 0) {
-			cnt = VM_REGION_EXTENDED_INFO_COUNT;
-			for(addr = 0; mach_vm_region(tfp0, &addr, &sz, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended_info, &cnt, &object_name) == KERN_SUCCESS; addr += sz) {
-				mach_port_deallocate(mach_task_self(), object_name);
-				if(extended_info.protection == VM_PROT_READ && extended_info.user_tag == VM_KERN_MEMORY_OSKEXT) {
+			for(addr = 0; proc_pidinfo(0, PROC_PIDREGIONINFO, addr, &pri, sizeof(pri)) == sizeof(pri); addr += pri.pri_size) {
+				addr = pri.pri_address;
+				if(pri.pri_protection == VM_PROT_READ && pri.pri_user_tag == VM_KERN_MEMORY_OSKEXT) {
 					if(kread_buf(addr + LOADED_KEXT_SUMMARY_HDR_NAME_OFF, kext_name, sizeof(kext_name)) == KERN_SUCCESS) {
 						printf("kext_name: %s\n", kext_name);
 						if(kread_addr(addr + LOADED_KEXT_SUMMARY_HDR_ADDR_OFF, &kext_addr_slid) == KERN_SUCCESS) {
@@ -670,6 +676,7 @@ get_boot_path(void) {
 static kern_return_t
 pfinder_init_offsets(void) {
 	kern_return_t ret = KERN_FAILURE;
+	struct utsname uts;
 	pfinder_t pfinder;
 	char *boot_path;
 
@@ -693,7 +700,11 @@ pfinder_init_offsets(void) {
 							task_itk_space_off = 0x330;
 							io_dt_nvram_of_dict_off = 0xB8;
 							if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_3_b1) {
-								io_dt_nvram_of_dict_off = 0xC0;
+								if(uname(&uts) == 0 && strstr(uts.version, "xnu-7195.60.63") != NULL) {
+									io_dt_nvram_of_dict_off = 0xC0;
+								} else {
+									io_dt_nvram_of_dict_off = 0xC8;
+								}
 							}
 						}
 					}
@@ -782,10 +793,10 @@ nonce_generate(io_service_t nonce_serv) {
 }
 
 static kern_return_t
-get_of_dict(io_service_t nvram_serv, kaddr_t *of_dict) {
+get_of_dict(io_registry_entry_t nvram_entry, kaddr_t *of_dict) {
 	kaddr_t nvram_object;
 
-	if(lookup_io_object(nvram_serv, &nvram_object) == KERN_SUCCESS) {
+	if(lookup_io_object(nvram_entry, &nvram_object) == KERN_SUCCESS) {
 		printf("nvram_object: " KADDR_FMT "\n", nvram_object);
 		return kread_addr(nvram_object + io_dt_nvram_of_dict_off, of_dict);
 	}
@@ -836,13 +847,13 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 }
 
 static kern_return_t
-set_nvram_prop(io_service_t nvram_serv, const char *key, const char *val) {
+set_nvram_prop(io_registry_entry_t nvram_entry, const char *key, const char *val) {
 	CFStringRef cf_key = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, key, kCFStringEncodingUTF8, kCFAllocatorNull), cf_val;
 	kern_return_t ret = KERN_FAILURE;
 
 	if(cf_key != NULL) {
 		if((cf_val = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, val, kCFStringEncodingUTF8, kCFAllocatorNull)) != NULL) {
-			ret = IORegistryEntrySetCFProperty(nvram_serv, cf_key, cf_val);
+			ret = IORegistryEntrySetCFProperty(nvram_entry, cf_key, cf_val);
 			CFRelease(cf_val);
 		}
 		CFRelease(cf_key);
@@ -851,9 +862,9 @@ set_nvram_prop(io_service_t nvram_serv, const char *key, const char *val) {
 }
 
 static kern_return_t
-sync_nonce(io_service_t nvram_serv) {
-	if(set_nvram_prop(nvram_serv, "temp_key", "temp_val") == KERN_SUCCESS && set_nvram_prop(nvram_serv, kIONVRAMDeletePropertyKey, "temp_key") == KERN_SUCCESS) {
-		return set_nvram_prop(nvram_serv, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
+sync_nonce(io_registry_entry_t nvram_entry) {
+	if(set_nvram_prop(nvram_entry, "temp_key", "temp_val") == KERN_SUCCESS && set_nvram_prop(nvram_entry, kIONVRAMDeletePropertyKey, "temp_key") == KERN_SUCCESS) {
+		return set_nvram_prop(nvram_entry, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
 	}
 	return KERN_FAILURE;
 }
@@ -882,7 +893,7 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 				if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
 					printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
 					for(; key_cnt-- != 0 && kread_buf(keys_ptr, &key, sizeof(key)) == KERN_SUCCESS; keys_ptr += sizeof(key)) {
-						printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 "\n", key.generated, key.key_id, key.key_sz);
+						printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
 						if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
 							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
 								CC_SHA384(buf, sizeof(buf), entangled_nonce);
@@ -931,16 +942,16 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 
 kern_return_t
 dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
-	io_service_t nvram_serv = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
-	char nonce_hex[sizeof("0x") + 2 * sizeof(*nonce)];
+	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
+	char nonce_hex[2 * sizeof(*nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
 	kern_return_t ret = KERN_FAILURE;
 
-	if(nvram_serv != IO_OBJECT_NULL) {
-		printf("nvram_serv: 0x%" PRIX32 "\n", nvram_serv);
+	if(nvram_entry != IO_OBJECT_NULL) {
+		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 			printf("our_task: " KADDR_FMT "\n", our_task);
-			if(get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+			if(get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS && of_dict != 0) {
 				printf("of_dict: " KADDR_FMT "\n", of_dict);
 				if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
 					printf("os_string: " KADDR_FMT "\n", os_string);
@@ -954,32 +965,33 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 				}
 			}
 		}
-		IOObjectRelease(nvram_serv);
+		IOObjectRelease(nvram_entry);
 	}
 	return ret;
 }
 
 kern_return_t
 dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
-	io_service_t nonce_serv, nvram_serv = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
-	char nonce_hex[sizeof("0x") + 2 * sizeof(nonce)];
+	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
+	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
 	kern_return_t ret = KERN_FAILURE;
+	io_service_t nonce_serv;
 
-	if(nvram_serv != IO_OBJECT_NULL) {
-		printf("nvram_serv: 0x%" PRIX32 "\n", nvram_serv);
+	if(nvram_entry != IO_OBJECT_NULL) {
+		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 			printf("our_task: " KADDR_FMT "\n", our_task);
 			if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
 				printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
-				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_serv, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS && of_dict != 0) {
 					printf("of_dict: " KADDR_FMT "\n", of_dict);
 					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
 						printf("os_string: " KADDR_FMT "\n", os_string);
 						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
 							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
-							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_serv) == KERN_SUCCESS) {
+							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_entry) == KERN_SUCCESS) {
 								ret = KERN_SUCCESS;
 								*entangled = entangle_nonce(nonce, entangled_nonce);
 							}
@@ -989,7 +1001,7 @@ dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool 
 				IOObjectRelease(nonce_serv);
 			}
 		}
-		IOObjectRelease(nvram_serv);
+		IOObjectRelease(nvram_entry);
 	}
 	return ret;
 }
