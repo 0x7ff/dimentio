@@ -42,13 +42,6 @@
 #define LOADED_KEXT_SUMMARY_HDR_ADDR_OFF (0x60)
 #define APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL (0xC9)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
-#define kCFCoreFoundationVersionNumber_iOS_10_0_b5 (1348)
-#define kCFCoreFoundationVersionNumber_iOS_13_0_b2 (1656)
-#define kCFCoreFoundationVersionNumber_iOS_14_0_b1 (1740)
-#define kCFCoreFoundationVersionNumber_iOS_11_0_b1 (1429.15)
-#define kCFCoreFoundationVersionNumber_iOS_12_0_b1 (1535.13)
-#define kCFCoreFoundationVersionNumber_iOS_13_0_b1 (1652.20)
-#define kCFCoreFoundationVersionNumber_iOS_14_3_b1 (1770.300)
 #define BOOT_PATH "/System/Library/Caches/com.apple.kernelcaches/kernelcache"
 
 #define DER_INT (0x2U)
@@ -102,9 +95,9 @@ typedef struct {
 typedef struct {
 	struct symtab_command cmd_symtab;
 	sec_64_t sec_text, sec_cstring;
-	kaddr_t base, kslide;
 	const char *kernel;
 	size_t kernel_sz;
+	kaddr_t base;
 	char *data;
 } pfinder_t;
 
@@ -301,6 +294,9 @@ init_tfp0(void) {
 			ret = host_get_special_port(host, HOST_LOCAL_NODE, 4, &tfp0);
 			mach_port_deallocate(mach_task_self(), host);
 		}
+		if(ret != KERN_SUCCESS) {
+			ret = task_get_special_port(mach_task_self(), TASK_ACCESS_PORT, &tfp0);
+		}
 	}
 	if(ret == KERN_SUCCESS && MACH_PORT_VALID(tfp0)) {
 		if(pid_for_task(tfp0, &pid) == KERN_SUCCESS && pid == 0) {
@@ -387,7 +383,6 @@ sec_read_buf(sec_64_t sec, kaddr_t addr, void *buf, size_t sz) {
 static void
 pfinder_reset(pfinder_t *pfinder) {
 	pfinder->base = 0;
-	pfinder->kslide = 0;
 	pfinder->data = NULL;
 	pfinder->kernel = NULL;
 	pfinder->kernel_sz = 0;
@@ -403,17 +398,92 @@ pfinder_term(pfinder_t *pfinder) {
 }
 
 static kern_return_t
-pfinder_init_file(pfinder_t *pfinder, const char *filename) {
+pfinder_init_macho(pfinder_t *pfinder, size_t off) {
+	const char *p = pfinder->kernel + off, *e;
+	struct fileset_entry_command fec;
 	struct symtab_command cmd_symtab;
-	kern_return_t ret = KERN_FAILURE;
 	struct segment_command_64 sg64;
 	struct mach_header_64 mh64;
 	struct load_command lc;
 	struct section_64 s64;
+
+	memcpy(&mh64, p, sizeof(mh64));
+	if(mh64.magic == MH_MAGIC_64 && mh64.cputype == CPU_TYPE_ARM64 && (mh64.filetype == MH_EXECUTE || (off == 0 && mh64.filetype == MH_FILESET)) && mh64.sizeofcmds < pfinder->kernel_sz - sizeof(mh64)) {
+		for(p += sizeof(mh64), e = p + mh64.sizeofcmds; mh64.ncmds-- != 0 && (size_t)(e - p) >= sizeof(lc); p += lc.cmdsize) {
+			memcpy(&lc, p, sizeof(lc));
+			if(lc.cmdsize < sizeof(lc) || (size_t)(e - p) < lc.cmdsize) {
+				break;
+			}
+			if(lc.cmd == LC_SEGMENT_64) {
+				if(lc.cmdsize < sizeof(sg64)) {
+					break;
+				}
+				memcpy(&sg64, p, sizeof(sg64));
+				if(sg64.vmsize == 0) {
+					continue;
+				}
+				if(sg64.nsects != (lc.cmdsize - sizeof(sg64)) / sizeof(s64) || sg64.fileoff > pfinder->kernel_sz || sg64.filesize > pfinder->kernel_sz - sg64.fileoff) {
+					break;
+				}
+				if(sg64.fileoff == 0 && sg64.filesize != 0) {
+					pfinder->base = sg64.vmaddr;
+					printf("base: " KADDR_FMT "\n", sg64.vmaddr);
+				}
+				if(mh64.filetype == MH_EXECUTE) {
+					if(strncmp(sg64.segname, SEG_TEXT_EXEC, sizeof(sg64.segname)) == 0) {
+						if(find_section(p + sizeof(sg64), sg64, SECT_TEXT, &s64) != KERN_SUCCESS) {
+							break;
+						}
+						pfinder->sec_text.s64 = s64;
+						pfinder->sec_text.data = pfinder->kernel + s64.offset;
+						printf("sec_text_addr: " KADDR_FMT ", sec_text_off: 0x%" PRIX32 ", sec_text_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
+					} else if(strncmp(sg64.segname, SEG_TEXT, sizeof(sg64.segname)) == 0) {
+						if(find_section(p + sizeof(sg64), sg64, SECT_CSTRING, &s64) != KERN_SUCCESS || pfinder->kernel[s64.offset + s64.size - 1] != '\0') {
+							break;
+						}
+						pfinder->sec_cstring.s64 = s64;
+						pfinder->sec_cstring.data = pfinder->kernel + s64.offset;
+						printf("sec_cstring_addr: " KADDR_FMT ", sec_cstring_off: 0x%" PRIX32 ", sec_cstring_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
+					}
+				}
+			} else if(lc.cmd == LC_SYMTAB) {
+				if(lc.cmdsize != sizeof(cmd_symtab)) {
+					break;
+				}
+				memcpy(&cmd_symtab, p, sizeof(cmd_symtab));
+				printf("cmd_symtab_symoff: 0x%" PRIX32 ", cmd_symtab_nsyms: 0x%" PRIX32 ", cmd_symtab_stroff: 0x%" PRIX32 "\n", cmd_symtab.symoff, cmd_symtab.nsyms, cmd_symtab.stroff);
+				if(cmd_symtab.nsyms != 0 && (cmd_symtab.symoff > pfinder->kernel_sz || cmd_symtab.nsyms > (pfinder->kernel_sz - cmd_symtab.symoff) / sizeof(struct nlist_64) || cmd_symtab.stroff > pfinder->kernel_sz || cmd_symtab.strsize > pfinder->kernel_sz - cmd_symtab.stroff || cmd_symtab.strsize == 0 || pfinder->kernel[cmd_symtab.stroff + cmd_symtab.strsize - 1] != '\0')) {
+					break;
+				}
+				pfinder->cmd_symtab = cmd_symtab;
+			} else if(mh64.filetype == MH_FILESET && lc.cmd == LC_FILESET_ENTRY) {
+				if(lc.cmdsize < sizeof(fec)) {
+					break;
+				}
+				memcpy(&fec, p, sizeof(fec));
+				if(fec.fileoff == 0 || fec.fileoff > pfinder->kernel_sz - sizeof(mh64) || fec.entry_id.offset > fec.cmdsize || p[fec.cmdsize - fec.entry_id.offset - 1] != '\0') {
+					break;
+				}
+				if(strcmp(p + fec.entry_id.offset, "com.apple.kernel") == 0 && pfinder_init_macho(pfinder, fec.fileoff) == KERN_SUCCESS) {
+					return KERN_SUCCESS;
+				}
+			}
+			if(pfinder->base != 0 && pfinder->sec_text.s64.size != 0 && pfinder->sec_cstring.s64.size != 0 && pfinder->cmd_symtab.cmdsize != 0) {
+				return KERN_SUCCESS;
+			}
+		}
+	}
+	return KERN_FAILURE;
+}
+
+static kern_return_t
+pfinder_init_file(pfinder_t *pfinder, const char *filename) {
+	kern_return_t ret = KERN_FAILURE;
+	struct mach_header_64 mh64;
 	struct fat_header fh;
 	struct stat stat_buf;
 	struct fat_arch fa;
-	const char *p, *e;
+	const char *p;
 	size_t len;
 	void *m;
 	int fd;
@@ -436,63 +506,7 @@ pfinder_init_file(pfinder_t *pfinder, const char *filename) {
 							}
 						}
 					}
-					memcpy(&mh64, pfinder->kernel, sizeof(mh64));
-					if(mh64.magic == MH_MAGIC_64 && mh64.cputype == CPU_TYPE_ARM64 && mh64.filetype == MH_EXECUTE && mh64.sizeofcmds < pfinder->kernel_sz - sizeof(mh64)) {
-						for(p = pfinder->kernel + sizeof(mh64), e = p + mh64.sizeofcmds; mh64.ncmds-- != 0 && (size_t)(e - p) >= sizeof(lc); p += lc.cmdsize) {
-							memcpy(&lc, p, sizeof(lc));
-							if(lc.cmdsize < sizeof(lc) || (size_t)(e - p) < lc.cmdsize) {
-								break;
-							}
-							if(lc.cmd == LC_SEGMENT_64) {
-								if(lc.cmdsize < sizeof(sg64)) {
-									break;
-								}
-								memcpy(&sg64, p, sizeof(sg64));
-								if(sg64.vmsize == 0) {
-									continue;
-								}
-								if(sg64.nsects != (lc.cmdsize - sizeof(sg64)) / sizeof(s64) || sg64.fileoff > pfinder->kernel_sz || sg64.filesize > pfinder->kernel_sz - sg64.fileoff) {
-									break;
-								}
-								if(sg64.fileoff == 0 && sg64.filesize != 0) {
-									if(pfinder->base != 0) {
-										break;
-									}
-									pfinder->base = sg64.vmaddr;
-									printf("base: " KADDR_FMT "\n", sg64.vmaddr);
-								}
-								if(strncmp(sg64.segname, SEG_TEXT_EXEC, sizeof(sg64.segname)) == 0) {
-									if(find_section(p + sizeof(sg64), sg64, SECT_TEXT, &s64) != KERN_SUCCESS) {
-										break;
-									}
-									pfinder->sec_text.s64 = s64;
-									pfinder->sec_text.data = pfinder->kernel + s64.offset;
-									printf("sec_text_addr: " KADDR_FMT ", sec_text_off: 0x%" PRIX32 ", sec_text_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
-								} else if(strncmp(sg64.segname, SEG_TEXT, sizeof(sg64.segname)) == 0) {
-									if(find_section(p + sizeof(sg64), sg64, SECT_CSTRING, &s64) != KERN_SUCCESS || pfinder->kernel[s64.offset + s64.size - 1] != '\0') {
-										break;
-									}
-									pfinder->sec_cstring.s64 = s64;
-									pfinder->sec_cstring.data = pfinder->kernel + s64.offset;
-									printf("sec_cstring_addr: " KADDR_FMT ", sec_cstring_off: 0x%" PRIX32 ", sec_cstring_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
-								}
-							} else if(lc.cmd == LC_SYMTAB) {
-								if(lc.cmdsize != sizeof(cmd_symtab)) {
-									break;
-								}
-								memcpy(&cmd_symtab, p, sizeof(cmd_symtab));
-								printf("cmd_symtab_symoff: 0x%" PRIX32 ", cmd_symtab_nsyms: 0x%" PRIX32 ", cmd_symtab_stroff: 0x%" PRIX32 "\n", cmd_symtab.symoff, cmd_symtab.nsyms, cmd_symtab.stroff);
-								if(cmd_symtab.nsyms != 0 && (cmd_symtab.symoff > pfinder->kernel_sz || cmd_symtab.nsyms > (pfinder->kernel_sz - cmd_symtab.symoff) / sizeof(struct nlist_64) || cmd_symtab.stroff > pfinder->kernel_sz || cmd_symtab.strsize > pfinder->kernel_sz - cmd_symtab.stroff || cmd_symtab.strsize == 0 || pfinder->kernel[cmd_symtab.stroff + cmd_symtab.strsize - 1] != '\0')) {
-									break;
-								}
-								pfinder->cmd_symtab = cmd_symtab;
-							}
-							if(pfinder->base != 0 && pfinder->sec_text.s64.size != 0 && pfinder->sec_cstring.s64.size != 0 && pfinder->cmd_symtab.cmdsize != 0) {
-								ret = KERN_SUCCESS;
-								break;
-							}
-						}
-					}
+					ret = pfinder_init_macho(pfinder, 0);
 				}
 				munmap(m, len);
 			}
@@ -564,7 +578,7 @@ pfinder_sym(pfinder_t pfinder, const char *sym) {
 	for(p = pfinder.kernel + pfinder.cmd_symtab.symoff; pfinder.cmd_symtab.nsyms-- != 0; p += sizeof(nl64)) {
 		memcpy(&nl64, p, sizeof(nl64));
 		if(nl64.n_un.n_strx != 0 && nl64.n_un.n_strx < pfinder.cmd_symtab.strsize && (nl64.n_type & (N_STAB | N_TYPE)) == N_SECT && nl64.n_value >= pfinder.base && strcmp(strtab + nl64.n_un.n_strx, sym) == 0) {
-			return nl64.n_value + pfinder.kslide;
+			return nl64.n_value + kslide;
 		}
 	}
 	return 0;
@@ -599,11 +613,11 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	CFNumberRef kext_addr_cf;
 	CFArrayRef kext_names;
 
-	if(pfinder->kslide == 0) {
+	if(kslide == 0) {
 		if(tfp0 != TASK_NULL && task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) == KERN_SUCCESS) {
-			pfinder->kslide = dyld_info.all_image_info_size;
+			kslide = dyld_info.all_image_info_size;
 		}
-		if(pfinder->kslide == 0) {
+		if(kslide == 0) {
 			for(addr = 0; proc_pidinfo(0, PROC_PIDREGIONINFO, addr, &pri, sizeof(pri)) == sizeof(pri); addr += pri.pri_size) {
 				addr = pri.pri_address;
 				if(pri.pri_protection == VM_PROT_READ && pri.pri_user_tag == VM_KERN_MEMORY_OSKEXT) {
@@ -615,7 +629,7 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 								if((kext_names = CFArrayCreate(kCFAllocatorDefault, (const void **)&kext_name_cf, 1, &kCFTypeArrayCallBacks)) != NULL) {
 									if((kexts_info = OSKextCopyLoadedKextInfo(kext_names, NULL)) != NULL) {
 										if(CFGetTypeID(kexts_info) == CFDictionaryGetTypeID() && CFDictionaryGetCount(kexts_info) == 1 && (kext_info = CFDictionaryGetValue(kexts_info, kext_name_cf)) != NULL && CFGetTypeID(kext_info) == CFDictionaryGetTypeID() && (kext_addr_cf = CFDictionaryGetValue(kext_info, CFSTR(kOSBundleLoadAddressKey))) != NULL && CFGetTypeID(kext_addr_cf) == CFNumberGetTypeID() && CFNumberGetValue(kext_addr_cf, kCFNumberSInt64Type, &kext_addr) && kext_addr_slid > kext_addr) {
-											pfinder->kslide = kext_addr_slid - kext_addr;
+											kslide = kext_addr_slid - kext_addr;
 										}
 										CFRelease(kexts_info);
 									}
@@ -630,10 +644,10 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 			}
 		}
 	}
-	if(pfinder->base + pfinder->kslide > pfinder->base && kread_buf(pfinder->base + pfinder->kslide, &mh64, sizeof(mh64)) == KERN_SUCCESS && mh64.magic == MH_MAGIC_64 && mh64.cputype == CPU_TYPE_ARM64 && mh64.filetype == MH_EXECUTE) {
-		pfinder->sec_text.s64.addr += pfinder->kslide;
-		pfinder->sec_cstring.s64.addr += pfinder->kslide;
-		printf("kbase: " KADDR_FMT ", kslide: " KADDR_FMT "\n", pfinder->base + pfinder->kslide, pfinder->kslide);
+	if(pfinder->base + kslide > pfinder->base && kread_buf(pfinder->base + kslide, &mh64, sizeof(mh64)) == KERN_SUCCESS && mh64.magic == MH_MAGIC_64 && mh64.cputype == CPU_TYPE_ARM64 && mh64.filetype == MH_EXECUTE) {
+		pfinder->sec_text.s64.addr += kslide;
+		pfinder->sec_cstring.s64.addr += kslide;
+		printf("kbase: " KADDR_FMT ", kslide: " KADDR_FMT "\n", pfinder->base + kslide, kslide);
 		return KERN_SUCCESS;
 	}
 	return KERN_FAILURE;
@@ -676,53 +690,59 @@ get_boot_path(void) {
 static kern_return_t
 pfinder_init_offsets(void) {
 	kern_return_t ret = KERN_FAILURE;
+	char *p, *e, *boot_path;
+	CFComparisonResult res;
 	struct utsname uts;
+	CFStringRef cf_str;
 	pfinder_t pfinder;
-	char *boot_path;
 
-	proc_task_off = 0x18;
-	proc_p_pid_off = 0x10;
-	task_itk_space_off = 0x290;
-	io_dt_nvram_of_dict_off = 0xC0;
-	if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_10_0_b5) {
-		task_itk_space_off = 0x300;
-		if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_11_0_b1) {
-			task_itk_space_off = 0x308;
-			if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_12_0_b1) {
-				proc_task_off = 0x10;
-				proc_p_pid_off = 0x60;
+	if(uname(&uts) == 0 && (p = strstr(uts.version, "root:xnu-")) != NULL && (e = strchr(p += strlen("root:xnu-"), '~')) != NULL) {
+		*e = '\0';
+		if((cf_str = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, p, kCFStringEncodingASCII, kCFAllocatorNull)) != NULL) {
+			proc_task_off = 0x18;
+			proc_p_pid_off = 0x10;
+			task_itk_space_off = 0x290;
+			io_dt_nvram_of_dict_off = 0xC0;
+			if((res = CFStringCompare(cf_str, CFSTR("3789.1.24"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
 				task_itk_space_off = 0x300;
-				if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b1) {
-					task_itk_space_off = 0x320;
-					if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_13_0_b2) {
-						proc_p_pid_off = 0x68;
-						if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_0_b1) {
-							task_itk_space_off = 0x330;
-							io_dt_nvram_of_dict_off = 0xB8;
-							if(kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_14_3_b1) {
-								if(uname(&uts) == 0 && strstr(uts.version, "xnu-7195.60.63") != NULL) {
-									io_dt_nvram_of_dict_off = 0xC0;
-								} else {
-									io_dt_nvram_of_dict_off = 0xC8;
+				if((res = CFStringCompare(cf_str, CFSTR("4397.0.0.2.4"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+					task_itk_space_off = 0x308;
+					if((res = CFStringCompare(cf_str, CFSTR("4903.200.199.12.3"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+						proc_task_off = 0x10;
+						proc_p_pid_off = 0x60;
+						task_itk_space_off = 0x300;
+						if((res = CFStringCompare(cf_str, CFSTR("6041.0.0.110.11"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+							task_itk_space_off = 0x320;
+							if((res = CFStringCompare(cf_str, CFSTR("6110.0.0.120.8"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+								proc_p_pid_off = 0x68;
+								if((res = CFStringCompare(cf_str, CFSTR("7090.0.0.112.4"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+									task_itk_space_off = 0x330;
+									io_dt_nvram_of_dict_off = 0xB8;
+									if((res = CFStringCompare(cf_str, CFSTR("7195.60.63"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+										io_dt_nvram_of_dict_off = 0xC0;
+										if((res = CFStringCompare(cf_str, CFSTR("7195.62.1"), kCFCompareNumerically) == kCFCompareGreaterThan) || res == kCFCompareEqualTo) {
+											io_dt_nvram_of_dict_off = 0xC8;
+										}
+									}
 								}
 							}
 						}
 					}
 				}
 			}
-		}
-	}
-	if((boot_path = get_boot_path()) != NULL) {
-		printf("boot_path: %s\n", boot_path);
-		if(pfinder_init_file(&pfinder, boot_path) == KERN_SUCCESS) {
-			pfinder.kslide = kslide;
-			if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
-				printf("kernproc: " KADDR_FMT "\n", kernproc);
-				ret = KERN_SUCCESS;
+			CFRelease(cf_str);
+			if((boot_path = get_boot_path()) != NULL) {
+				printf("boot_path: %s\n", boot_path);
+				if(pfinder_init_file(&pfinder, boot_path) == KERN_SUCCESS) {
+					if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
+						printf("kernproc: " KADDR_FMT "\n", kernproc);
+						ret = KERN_SUCCESS;
+					}
+					pfinder_term(&pfinder);
+				}
+				free(boot_path);
 			}
-			pfinder_term(&pfinder);
 		}
-		free(boot_path);
 	}
 	return ret;
 }
@@ -814,7 +834,7 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 	char *cur_key;
 
 	if((cur_key = malloc(key_len)) != NULL) {
-		if(kread_addr(os_dict + OS_DICTIONARY_DICT_ENTRY_OFF, &os_dict_entry_ptr) == KERN_SUCCESS && os_dict_entry_ptr != 0) {
+		if(kread_addr(os_dict + OS_DICTIONARY_DICT_ENTRY_OFF, &os_dict_entry_ptr) == KERN_SUCCESS) {
 			printf("os_dict_entry_ptr: " KADDR_FMT "\n", os_dict_entry_ptr);
 			if(kread_buf(os_dict + OS_DICTIONARY_COUNT_OFF, &os_dict_cnt, sizeof(os_dict_cnt)) == KERN_SUCCESS) {
 				printf("os_dict_cnt: 0x%" PRIX32 "\n", os_dict_cnt);
@@ -826,7 +846,7 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 					cur_key_len = OS_STRING_LEN(cur_key_len);
 					printf("cur_key_len: 0x%" PRIX32 "\n", cur_key_len);
 					if(cur_key_len == key_len) {
-						if(kread_addr(os_dict_entry.key + OS_STRING_STRING_OFF, &string_ptr) != KERN_SUCCESS || string_ptr == 0) {
+						if(kread_addr(os_dict_entry.key + OS_STRING_STRING_OFF, &string_ptr) != KERN_SUCCESS) {
 							break;
 						}
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
@@ -933,7 +953,7 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 		kread_buf = _kread_buf != NULL ? _kread_buf : kread_buf_tfp0;
 		kwrite_buf = _kwrite_buf != NULL ? _kwrite_buf : kwrite_buf_tfp0;
 	}
-	if(setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1 && pfinder_init_offsets() == KERN_SUCCESS) {
+	if(kread_buf != NULL && kwrite_buf != NULL && setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1 && pfinder_init_offsets() == KERN_SUCCESS) {
 		return KERN_SUCCESS;
 	}
 	dimentio_term();
@@ -951,11 +971,11 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 			printf("our_task: " KADDR_FMT "\n", our_task);
-			if(get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+			if(get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
 				printf("of_dict: " KADDR_FMT "\n", of_dict);
 				if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
 					printf("os_string: " KADDR_FMT "\n", os_string);
-					if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
+					if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 						if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
 							ret = KERN_SUCCESS;
@@ -984,11 +1004,11 @@ dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool 
 			printf("our_task: " KADDR_FMT "\n", our_task);
 			if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
 				printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
-				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS && of_dict != 0) {
+				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
 					printf("of_dict: " KADDR_FMT "\n", of_dict);
 					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
 						printf("os_string: " KADDR_FMT "\n", os_string);
-						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS && string_ptr != 0) {
+						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
 							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
 							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_entry) == KERN_SUCCESS) {
