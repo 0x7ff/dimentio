@@ -807,19 +807,24 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 }
 
 static kern_return_t
-nonce_generate(io_service_t nonce_serv) {
+nonce_generate(bool clear) {
 	uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH];
 	kern_return_t ret = KERN_FAILURE;
+	io_service_t nonce_serv;
 	io_connect_t nonce_conn;
 	size_t nonce_d_sz;
 
-	if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
-		printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
-		if(IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
-			nonce_d_sz = sizeof(nonce_d);
-			ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
+	if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
+		printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
+		if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
+			printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
+			if(!clear || IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
+				nonce_d_sz = sizeof(nonce_d);
+				ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
+			}
+			IOServiceClose(nonce_conn);
 		}
-		IOServiceClose(nonce_conn);
+		IOObjectRelease(nonce_serv);
 	}
 	return ret;
 }
@@ -980,7 +985,7 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 }
 
 kern_return_t
-dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
+dimentio(uint64_t *nonce, bool set, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
 	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
 	char nonce_hex[2 * sizeof(*nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
@@ -991,7 +996,7 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 			kxpacd(&our_task);
 			printf("our_task: " KADDR_FMT "\n", our_task);
-			if(get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
+			if(nonce_generate(set) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
 				kxpacd(&of_dict);
 				printf("of_dict: " KADDR_FMT "\n", of_dict);
 				if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
@@ -1000,52 +1005,19 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 					if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
 						kxpacd(&string_ptr);
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-						if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
+						if(set) {
+							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, *nonce);
+							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS) {
+								ret = sync_nonce(nvram_entry);
+							}
+						} else if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
 							ret = KERN_SUCCESS;
+						}
+						if(ret == KERN_SUCCESS) {
 							*entangled = entangle_nonce(*nonce, entangled_nonce);
 						}
 					}
 				}
-			}
-		}
-		IOObjectRelease(nvram_entry);
-	}
-	return ret;
-}
-
-kern_return_t
-dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
-	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
-	char nonce_hex[2 * sizeof(nonce) + sizeof("0x")];
-	kaddr_t of_dict, os_string, string_ptr;
-	kern_return_t ret = KERN_FAILURE;
-	io_service_t nonce_serv;
-
-	if(nvram_entry != IO_OBJECT_NULL) {
-		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
-		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
-			kxpacd(&our_task);
-			printf("our_task: " KADDR_FMT "\n", our_task);
-			if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
-				printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
-				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
-					kxpacd(&of_dict);
-					printf("of_dict: " KADDR_FMT "\n", of_dict);
-					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
-						kxpacd(&os_string);
-						printf("os_string: " KADDR_FMT "\n", os_string);
-						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
-							kxpacd(&string_ptr);
-							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
-							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
-							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_entry) == KERN_SUCCESS) {
-								ret = KERN_SUCCESS;
-								*entangled = entangle_nonce(nonce, entangled_nonce);
-							}
-						}
-					}
-				}
-				IOObjectRelease(nonce_serv);
 			}
 		}
 		IOObjectRelease(nvram_entry);
