@@ -168,6 +168,15 @@ sextract64(uint64_t val, unsigned start, unsigned len) {
 	return (uint64_t)((int64_t)(val << (64U - len - start)) >> (64U - len));
 }
 
+static void
+kxpacd(kaddr_t *addr) {
+#ifdef __arm64e__
+	__asm__ volatile("xpacd %0" : "+r"(*addr));
+#else
+	(void)addr;
+#endif
+}
+
 static size_t
 decompress_lzss(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_len) {
 	const uint8_t *src_end = src + src_len, *dst_start = dst, *dst_end = dst + dst_len;
@@ -461,7 +470,7 @@ pfinder_init_macho(pfinder_t *pfinder, size_t off) {
 					break;
 				}
 				memcpy(&fec, p, sizeof(fec));
-				if(fec.fileoff == 0 || fec.fileoff > pfinder->kernel_sz - sizeof(mh64) || fec.entry_id.offset > fec.cmdsize || p[fec.cmdsize - fec.entry_id.offset - 1] != '\0') {
+				if(fec.fileoff == 0 || fec.fileoff > pfinder->kernel_sz - sizeof(mh64) || fec.entry_id.offset > fec.cmdsize || p[fec.cmdsize - 1] != '\0') {
 					break;
 				}
 				if(strcmp(p + fec.entry_id.offset, "com.apple.kernel") == 0 && pfinder_init_macho(pfinder, fec.fileoff) == KERN_SUCCESS) {
@@ -771,10 +780,12 @@ lookup_ipc_port(mach_port_name_t port_name, kaddr_t *ipc_port) {
 	kaddr_t itk_space, is_table;
 
 	if(MACH_PORT_VALID(port_name) && kread_addr(our_task + task_itk_space_off, &itk_space) == KERN_SUCCESS) {
+		kxpacd(&itk_space);
 		printf("itk_space: " KADDR_FMT "\n", itk_space);
 		if(kread_buf(itk_space + IPC_SPACE_IS_TABLE_SZ_OFF, &is_table_sz, sizeof(is_table_sz)) == KERN_SUCCESS) {
 			printf("is_table_sz: 0x%" PRIX32 "\n", is_table_sz);
 			if((port_idx = MACH_PORT_INDEX(port_name)) < is_table_sz && kread_addr(itk_space + IPC_SPACE_IS_TABLE_OFF, &is_table) == KERN_SUCCESS) {
+				kxpacd(&is_table);
 				printf("is_table: " KADDR_FMT "\n", is_table);
 				return kread_addr(is_table + port_idx * IPC_ENTRY_SZ + IPC_ENTRY_IE_OBJECT_OFF, ipc_port);
 			}
@@ -788,6 +799,7 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 	kaddr_t ipc_port;
 
 	if(lookup_ipc_port(object, &ipc_port) == KERN_SUCCESS) {
+		kxpacd(&ipc_port);
 		printf("ipc_port: " KADDR_FMT "\n", ipc_port);
 		return kread_addr(ipc_port + IPC_PORT_IP_KOBJECT_OFF, ip_kobject);
 	}
@@ -817,6 +829,7 @@ get_of_dict(io_registry_entry_t nvram_entry, kaddr_t *of_dict) {
 	kaddr_t nvram_object;
 
 	if(lookup_io_object(nvram_entry, &nvram_object) == KERN_SUCCESS) {
+		kxpacd(&nvram_object);
 		printf("nvram_object: " KADDR_FMT "\n", nvram_object);
 		return kread_addr(nvram_object + io_dt_nvram_of_dict_off, of_dict);
 	}
@@ -835,10 +848,13 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 
 	if((cur_key = malloc(key_len)) != NULL) {
 		if(kread_addr(os_dict + OS_DICTIONARY_DICT_ENTRY_OFF, &os_dict_entry_ptr) == KERN_SUCCESS) {
+			kxpacd(&os_dict_entry_ptr);
 			printf("os_dict_entry_ptr: " KADDR_FMT "\n", os_dict_entry_ptr);
 			if(kread_buf(os_dict + OS_DICTIONARY_COUNT_OFF, &os_dict_cnt, sizeof(os_dict_cnt)) == KERN_SUCCESS) {
 				printf("os_dict_cnt: 0x%" PRIX32 "\n", os_dict_cnt);
 				while(os_dict_cnt-- != 0 && kread_buf(os_dict_entry_ptr + os_dict_cnt * sizeof(os_dict_entry), &os_dict_entry, sizeof(os_dict_entry)) == KERN_SUCCESS) {
+					kxpacd(&os_dict_entry.key);
+					kxpacd(&os_dict_entry.val);
 					printf("key: " KADDR_FMT ", val: " KADDR_FMT "\n", os_dict_entry.key, os_dict_entry.val);
 					if(kread_buf(os_dict_entry.key + OS_STRING_LEN_OFF, &cur_key_len, sizeof(cur_key_len)) != KERN_SUCCESS) {
 						break;
@@ -849,6 +865,7 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 						if(kread_addr(os_dict_entry.key + OS_STRING_STRING_OFF, &string_ptr) != KERN_SUCCESS) {
 							break;
 						}
+						kxpacd(&string_ptr);
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 						if(kread_buf(string_ptr, cur_key, key_len) != KERN_SUCCESS) {
 							break;
@@ -907,8 +924,10 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 	if(aes_serv != IO_OBJECT_NULL) {
 		printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
 		if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
+			kxpacd(&aes_object);
 			printf("aes_object: " KADDR_FMT "\n", aes_object);
 			if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
+				kxpacd(&keys_ptr);
 				printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
 				if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
 					printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
@@ -970,12 +989,16 @@ dementia(uint64_t *nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool
 	if(nvram_entry != IO_OBJECT_NULL) {
 		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
+			kxpacd(&our_task);
 			printf("our_task: " KADDR_FMT "\n", our_task);
 			if(get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
+				kxpacd(&of_dict);
 				printf("of_dict: " KADDR_FMT "\n", of_dict);
 				if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
+					kxpacd(&os_string);
 					printf("os_string: " KADDR_FMT "\n", os_string);
 					if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
+						kxpacd(&string_ptr);
 						printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 						if(kread_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
 							ret = KERN_SUCCESS;
@@ -1001,14 +1024,18 @@ dimentio(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool 
 	if(nvram_entry != IO_OBJECT_NULL) {
 		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
+			kxpacd(&our_task);
 			printf("our_task: " KADDR_FMT "\n", our_task);
 			if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
 				printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 				if(nonce_generate(nonce_serv) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
+					kxpacd(&of_dict);
 					printf("of_dict: " KADDR_FMT "\n", of_dict);
 					if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
+						kxpacd(&os_string);
 						printf("os_string: " KADDR_FMT "\n", os_string);
 						if(kread_addr(os_string + OS_STRING_STRING_OFF, &string_ptr) == KERN_SUCCESS) {
+							kxpacd(&string_ptr);
 							printf("string_ptr: " KADDR_FMT "\n", string_ptr);
 							snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, nonce);
 							if(kwrite_buf(string_ptr, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sync_nonce(nvram_entry) == KERN_SUCCESS) {
