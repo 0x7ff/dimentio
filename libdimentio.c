@@ -302,7 +302,6 @@ static kern_return_t
 init_tfp0(void) {
 	kern_return_t ret = task_for_pid(mach_task_self(), 0, &tfp0);
 	mach_port_t host;
-	pid_t pid;
 
 	if(ret != KERN_SUCCESS) {
 		host = mach_host_self();
@@ -311,15 +310,9 @@ init_tfp0(void) {
 			ret = host_get_special_port(host, HOST_LOCAL_NODE, 4, &tfp0);
 			mach_port_deallocate(mach_task_self(), host);
 		}
-		if(ret != KERN_SUCCESS) {
-			ret = task_get_special_port(mach_task_self(), TASK_ACCESS_PORT, &tfp0);
-		}
 	}
 	if(ret == KERN_SUCCESS && MACH_PORT_VALID(tfp0)) {
-		if(pid_for_task(tfp0, &pid) == KERN_SUCCESS && pid == 0) {
-			return ret;
-		}
-		mach_port_deallocate(mach_task_self(), tfp0);
+		return ret;
 	}
 	return KERN_FAILURE;
 }
@@ -822,13 +815,13 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 
 static kern_return_t
 nonce_generate(bool clear) {
+	io_service_t nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"));
 	uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH];
 	kern_return_t ret = KERN_FAILURE;
-	io_service_t nonce_serv;
 	io_connect_t nonce_conn;
 	size_t nonce_d_sz;
 
-	if((nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"))) != IO_OBJECT_NULL) {
+	if(nonce_serv != IO_OBJECT_NULL) {
 		printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 		if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
 			printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
