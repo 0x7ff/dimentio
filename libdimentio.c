@@ -436,7 +436,7 @@ pfinder_init_macho(pfinder_t *pfinder, size_t off) {
 #else
 	   mh64.filetype == MH_EXECUTE
 #endif
-	   && mh64.sizeofcmds < pfinder->kernel_sz - sizeof(mh64)) {
+	   && mh64.sizeofcmds < (pfinder->kernel_sz - sizeof(mh64)) - off) {
 		for(p += sizeof(mh64), e = p + mh64.sizeofcmds; mh64.ncmds-- != 0 && (size_t)(e - p) >= sizeof(lc); p += lc.cmdsize) {
 			memcpy(&lc, p, sizeof(lc));
 			if(lc.cmdsize < sizeof(lc) || (size_t)(e - p) < lc.cmdsize) {
