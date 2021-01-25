@@ -634,10 +634,11 @@ pfinder_kernproc(pfinder_t pfinder) {
 static kaddr_t
 pfinder_init_kbase(pfinder_t *pfinder) {
 	struct {
-		uint32_t pri_protection, pri_max_protection, pri_inheritance, pri_flags;
+		uint32_t pri_prot, pri_max_prot, pri_inheritance, pri_flags;
 		uint64_t pri_offset;
-		uint32_t pri_behavior, pri_user_wired_count, pri_user_tag, pri_pages_resident, pri_pages_shared_now_private, pri_pages_swapped_out, pri_pages_dirtied, pri_ref_count, pri_shadow_depth, pri_share_mode, pri_private_pages_resident, pri_shared_pages_resident, pri_obj_id, pri_depth;
-		uint64_t pri_address, pri_size;
+		uint32_t pri_behavior, pri_user_wired_cnt, pri_user_tag, pri_pages_resident, pri_pages_shared_now_private, pri_pages_swapped_out, pri_pages_dirtied, pri_ref_cnt, pri_shadow_depth, pri_share_mode, pri_private_pages_resident, pri_shared_pages_resident, pri_obj_id, pri_depth;
+		kaddr_t pri_addr;
+		uint64_t pri_sz;
 	} pri;
 	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
 	kaddr_t addr, kext_addr, kext_addr_slid;
@@ -654,9 +655,9 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 			kslide = dyld_info.all_image_info_size;
 		}
 		if(kslide == 0) {
-			for(addr = 0; proc_pidinfo(0, PROC_PIDREGIONINFO, addr, &pri, sizeof(pri)) == sizeof(pri); addr += pri.pri_size) {
-				addr = pri.pri_address;
-				if(pri.pri_protection == VM_PROT_READ && pri.pri_user_tag == VM_KERN_MEMORY_OSKEXT) {
+			for(addr = 0; proc_pidinfo(0, PROC_PIDREGIONINFO, addr, &pri, sizeof(pri)) == sizeof(pri); addr += pri.pri_sz) {
+				addr = pri.pri_addr;
+				if(pri.pri_prot == VM_PROT_READ && pri.pri_user_tag == VM_KERN_MEMORY_OSKEXT) {
 					if(kread_buf(addr + LOADED_KEXT_SUMMARY_HDR_NAME_OFF, kext_name, sizeof(kext_name)) == KERN_SUCCESS) {
 						printf("kext_name: %s\n", kext_name);
 						if(kread_addr(addr + LOADED_KEXT_SUMMARY_HDR_ADDR_OFF, &kext_addr_slid) == KERN_SUCCESS) {
@@ -774,16 +775,16 @@ pfinder_init_offsets(void) {
 							task_itk_space_off = 0x320;
 							if(CFStringCompare(cf_str, CFSTR("6110.0.0.120.8"), kCFCompareNumerically) != kCFCompareLessThan) {
 								proc_p_pid_off = 0x68;
-								if(CFStringCompare(cf_str, CFSTR("7090.0.0.111.5"), kCFCompareNumerically) != kCFCompareLessThan) {
+								if(CFStringCompare(cf_str, CFSTR("7090.0.0.110.4"), kCFCompareNumerically) != kCFCompareLessThan) {
 									task_itk_space_off = 0x330;
 									io_dt_nvram_of_dict_off = 0xB8;
-									if(CFStringCompare(cf_str, CFSTR("7195.50.3"), kCFCompareNumerically) != kCFCompareLessThan) {
+									if(CFStringCompare(cf_str, CFSTR("7195.50.3.201.1"), kCFCompareNumerically) != kCFCompareLessThan) {
 #if TARGET_OS_OSX
 										io_dt_nvram_of_dict_off = 0xE0;
 #else
 										io_dt_nvram_of_dict_off = 0xC0;
 #endif
-										if(CFStringCompare(cf_str, CFSTR("7195.60.70.111.1"), kCFCompareNumerically) != kCFCompareLessThan) {
+										if(CFStringCompare(cf_str, CFSTR("7195.60.69"), kCFCompareNumerically) != kCFCompareLessThan) {
 #if TARGET_OS_OSX
 											io_dt_nvram_of_dict_off = 0xE8;
 #else
