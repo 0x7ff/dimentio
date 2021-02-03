@@ -790,6 +790,9 @@ pfinder_init_offsets(void) {
 #else
 											io_dt_nvram_of_dict_off = 0xC8;
 #endif
+                                            if(CFStringCompare(cf_str, CFSTR("7195.100.296"), kCFCompareNumerically) != kCFCompareLessThan) {
+                                                task_itk_space_off = 0x340;
+                                            }
 										}
 									}
 								}
