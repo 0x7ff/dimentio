@@ -790,6 +790,9 @@ pfinder_init_offsets(void) {
 #endif
 											if(CFStringCompare(cf_str, CFSTR("7195.100.296.111.3"), kCFCompareNumerically) != kCFCompareLessThan) {
 												task_itk_space_off = 0x340;
+												if(CFStringCompare(cf_str, CFSTR("7195.100.326.0.1"), kCFCompareNumerically) != kCFCompareLessThan) {
+													task_itk_space_off = 0x338;
+												}
 											}
 										}
 									}
@@ -993,7 +996,7 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 				printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
 				if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
 					printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
-					for(; key_cnt-- != 0 && kread_buf(keys_ptr, &key, sizeof(key)) == KERN_SUCCESS; keys_ptr += sizeof(key)) {
+					while(key_cnt-- != 0 && kread_buf(keys_ptr + key_cnt * sizeof(key), &key, sizeof(key)) == KERN_SUCCESS) {
 						printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
 						if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
 							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
