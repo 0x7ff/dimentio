@@ -14,6 +14,7 @@
  */
 #include "libdimentio.h"
 #include <compression.h>
+#include <dlfcn.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -90,6 +91,7 @@ typedef char io_string_t[512];
 typedef mach_port_t io_object_t;
 typedef uint32_t IOOptionBits, ipc_entry_num_t;
 typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
+typedef int (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t);
 
 typedef struct {
 	struct section_64 s64;
@@ -149,6 +151,7 @@ mach_vm_machine_attribute(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_machin
 
 extern const mach_port_t kIOMasterPortDefault;
 
+static void *krw_0;
 static int kmem_fd = -1;
 static kread_func_t kread_buf;
 static task_t tfp0 = TASK_NULL;
@@ -289,6 +292,20 @@ kdecompress(const void *src, size_t src_len, size_t *dst_len) {
 }
 
 static kern_return_t
+kread_buf_krw_0(kaddr_t addr, void *buf, size_t sz) {
+	static krw_0_kread_func_t krw_0_kread;
+
+	return (krw_0_kread != NULL || (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL) && krw_0_kread(addr, buf, sz) == 0 ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static kern_return_t
+kwrite_buf_krw_0(kaddr_t addr, const void *buf, size_t sz) {
+	static krw_0_kwrite_func_t krw_0_kwrite;
+
+	return (krw_0_kwrite != NULL || (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) && krw_0_kwrite(buf, addr, sz) == 0 ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static kern_return_t
 init_tfp0(void) {
 	kern_return_t ret = task_for_pid(mach_task_self(), 0, &tfp0);
 	mach_port_t host;
@@ -312,7 +329,7 @@ init_tfp0(void) {
 }
 
 static kern_return_t
-kread_buf_tfp0(kaddr_t addr, void *buf, mach_vm_size_t sz) {
+kread_buf_tfp0(kaddr_t addr, void *buf, size_t sz) {
 	mach_vm_address_t p = (mach_vm_address_t)buf;
 	mach_vm_size_t read_sz, out_sz = 0;
 
@@ -329,12 +346,7 @@ kread_buf_tfp0(kaddr_t addr, void *buf, mach_vm_size_t sz) {
 }
 
 static kern_return_t
-kread_addr(kaddr_t addr, kaddr_t *val) {
-	return kread_buf(addr, val, sizeof(*val));
-}
-
-static kern_return_t
-kwrite_buf_tfp0(kaddr_t addr, const void *buf, mach_msg_type_number_t sz) {
+kwrite_buf_tfp0(kaddr_t addr, const void *buf, size_t sz) {
 	vm_machine_attribute_val_t mattr_val = MATTR_VAL_CACHE_FLUSH;
 	mach_vm_address_t p = (mach_vm_address_t)buf;
 	mach_msg_type_number_t write_sz;
@@ -352,23 +364,28 @@ kwrite_buf_tfp0(kaddr_t addr, const void *buf, mach_msg_type_number_t sz) {
 }
 
 static kern_return_t
-kread_buf_kmem(kaddr_t addr, void *buf, mach_vm_size_t sz) {
+kread_buf_kmem(kaddr_t addr, void *buf, size_t sz) {
 	ssize_t n = pread(kmem_fd, buf, sz, (off_t)addr);
 
-	if(n > 0 && (mach_vm_size_t)n == sz) {
+	if(n > 0 && (size_t)n == sz) {
 		return KERN_SUCCESS;
 	}
 	return KERN_FAILURE;
 }
 
 static kern_return_t
-kwrite_buf_kmem(kaddr_t addr, const void *buf, mach_msg_type_number_t sz) {
+kwrite_buf_kmem(kaddr_t addr, const void *buf, size_t sz) {
 	ssize_t n = pwrite(kmem_fd, buf, sz, (off_t)addr);
 
-	if(n > 0 && (mach_msg_type_number_t)n == sz) {
+	if(n > 0 && (size_t)n == sz) {
 		return KERN_SUCCESS;
 	}
 	return KERN_FAILURE;
+}
+
+static kern_return_t
+kread_addr(kaddr_t addr, kaddr_t *val) {
+	return kread_buf(addr, val, sizeof(*val));
 }
 
 static kern_return_t
@@ -1020,7 +1037,9 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 
 void
 dimentio_term(void) {
-	if(tfp0 != TASK_NULL) {
+	if(krw_0 != NULL) {
+		dlclose(krw_0);
+	} else if(tfp0 != TASK_NULL) {
 		mach_port_deallocate(mach_task_self(), tfp0);
 	} else if(kmem_fd != -1) {
 		close(kmem_fd);
@@ -1034,13 +1053,16 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 	if(_kread_buf != NULL && _kwrite_buf != NULL) {
 		kread_buf = _kread_buf;
 		kwrite_buf = _kwrite_buf;
+	} else if((krw_0 = dlopen("/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL) {
+		kread_buf = kread_buf_krw_0;
+		kwrite_buf = kwrite_buf_krw_0;
 	} else if(init_tfp0() == KERN_SUCCESS) {
 		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
-		kread_buf = _kread_buf != NULL ? _kread_buf : kread_buf_tfp0;
-		kwrite_buf = _kwrite_buf != NULL ? _kwrite_buf : kwrite_buf_tfp0;
+		kread_buf = kread_buf_tfp0;
+		kwrite_buf = kwrite_buf_tfp0;
 	} else if((kmem_fd = open("/dev/kmem", O_RDWR | O_CLOEXEC)) != -1) {
-		kread_buf = _kread_buf != NULL ? _kread_buf : kread_buf_kmem;
-		kwrite_buf = _kwrite_buf != NULL ? _kwrite_buf : kwrite_buf_kmem;
+		kread_buf = kread_buf_kmem;
+		kwrite_buf = kwrite_buf_kmem;
 	} else {
 		return KERN_FAILURE;
 	}
@@ -1050,7 +1072,9 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 		}
 		setpriority(PRIO_PROCESS, 0, 0);
 	}
-	if(tfp0 != TASK_NULL) {
+	if(krw_0 != NULL) {
+		dlclose(krw_0);
+	} else if(tfp0 != TASK_NULL) {
 		mach_port_deallocate(mach_task_self(), tfp0);
 	} else if(kmem_fd != -1) {
 		close(kmem_fd);
