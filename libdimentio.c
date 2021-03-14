@@ -47,7 +47,6 @@
 #endif
 #define APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL (0xC9)
 #define APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL (0xC8)
-#define APPLE_MOBILE_AP_NONCE_RETRIEVE_NONCE_SEL (0xCA)
 #define BOOT_PATH "/System/Library/Caches/com.apple.kernelcaches/kernelcache"
 
 #define DER_INT (0x2U)
@@ -891,26 +890,20 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 }
 
 static kern_return_t
-nonce_generate(bool clear) {
+nonce_generate(void) {
 	io_service_t nonce_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleMobileApNonce"));
 	uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH];
 	kern_return_t ret = KERN_FAILURE;
 	io_connect_t nonce_conn;
-	uint64_t nonce;
 	size_t sz;
 
 	if(nonce_serv != IO_OBJECT_NULL) {
 		printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 		if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
 			printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
-			if(!clear || IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
-				sz = sizeof(nonce);
-				if((ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_RETRIEVE_NONCE_SEL, NULL, 0, &nonce, &sz)) != KERN_SUCCESS) {
-					sz = sizeof(nonce_d);
-					ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &sz);
-				} else {
-					printf("Retrieved nonce is 0x%016" PRIX64 "\n", nonce);
-				}
+			if(IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
+				sz = sizeof(nonce_d);
+				ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &sz);
 			}
 			IOServiceClose(nonce_conn);
 		}
@@ -1104,7 +1097,7 @@ dimentio(uint64_t *nonce, bool set, uint8_t entangled_nonce[CC_SHA384_DIGEST_LEN
 		if(find_task(getpid(), &our_task) == KERN_SUCCESS) {
 			kxpacd(&our_task);
 			printf("our_task: " KADDR_FMT "\n", our_task);
-			if(nonce_generate(set) == KERN_SUCCESS && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
+			if((!set || nonce_generate() == KERN_SUCCESS) && get_of_dict(nvram_entry, &of_dict) == KERN_SUCCESS) {
 				printf("of_dict: " KADDR_FMT "\n", of_dict);
 				if((os_string = lookup_key_in_os_dict(of_dict, kBootNoncePropertyKey)) != 0) {
 					printf("os_string: " KADDR_FMT "\n", os_string);
