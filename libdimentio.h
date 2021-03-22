@@ -16,11 +16,7 @@
 #	define LIBDIMENTIO_H
 #	include <CommonCrypto/CommonCrypto.h>
 #	include <CoreFoundation/CoreFoundation.h>
-#	include <mach/mach.h>
 #	define KADDR_FMT "0x%" PRIX64
-#	ifndef MIN
-#		define MIN(a, b) ((a) < (b) ? (a) : (b))
-#	endif
 typedef uint64_t kaddr_t;
 typedef kern_return_t (*kread_func_t)(kaddr_t, void *, size_t), (*kwrite_func_t)(kaddr_t, const void *, size_t);
 

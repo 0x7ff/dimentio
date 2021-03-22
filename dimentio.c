@@ -14,9 +14,14 @@
  */
 #include "libdimentio.h"
 
+#ifndef MIN
+#	define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
 int
 main(int argc, char **argv) {
 	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
+	int ret = EXIT_FAILURE;
 	uint64_t nonce;
 	bool entangled;
 	size_t i;
@@ -37,7 +42,9 @@ main(int argc, char **argv) {
 				}
 				putchar('\n');
 			}
+			ret = 0;
 		}
 		dimentio_term();
 	}
+	return ret;
 }

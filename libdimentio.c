@@ -18,6 +18,7 @@
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
+#include <mach/mach.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -85,6 +86,10 @@
 
 #ifndef SEG_TEXT_EXEC
 #	define SEG_TEXT_EXEC "__TEXT_EXEC"
+#endif
+
+#ifndef MIN
+#	define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
 typedef char io_string_t[512];
@@ -1066,10 +1071,8 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 	} else if((kmem_fd = open("/dev/kmem", O_RDWR | O_CLOEXEC)) != -1) {
 		kread_buf = kread_buf_kmem;
 		kwrite_buf = kwrite_buf_kmem;
-	} else {
-		return KERN_FAILURE;
 	}
-	if(setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1) {
+	if(kread_buf != NULL && kwrite_buf != NULL && setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1) {
 		if(pfinder_init_offsets() == KERN_SUCCESS) {
 			return KERN_SUCCESS;
 		}
@@ -1116,6 +1119,8 @@ dimentio(uint64_t *nonce, bool set, uint8_t entangled_nonce[CC_SHA384_DIGEST_LEN
 							*entangled = entangle_nonce(*nonce, entangled_nonce);
 						}
 					}
+				} else if(!set) {
+					puts("You have to set nonce first.");
 				}
 			}
 		}
