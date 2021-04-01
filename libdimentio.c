@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/sysctl.h>
 
 #define LZSS_F (18)
 #define LZSS_N (4096)
@@ -156,6 +157,8 @@ mach_vm_machine_attribute(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_machin
 
 extern const mach_port_t kIOMasterPortDefault;
 
+static bool isArm64e;
+
 static void *krw_0;
 static int kmem_fd = -1;
 static kread_func_t kread_buf;
@@ -178,11 +181,11 @@ sextract64(uint64_t val, unsigned start, unsigned len) {
 
 static void
 kxpacd(kaddr_t *addr) {
-#if defined(__arm64e__) || TARGET_OS_OSX
-	__asm__ volatile("xpacd %0" : "+r"(*addr));
-#else
-	(void)addr;
-#endif
+	if (isArm64e) {
+		if (addr){
+			*addr = *addr | 0xffffff8000000000;
+		}
+	}
 }
 
 static size_t
@@ -1000,7 +1003,9 @@ sync_nonce(io_registry_entry_t nvram_entry) {
 static bool
 entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH]) {
 	bool ret = false;
-#if defined(__arm64e__) || TARGET_OS_OSX
+	if (!isArm64e){
+		return ret;
+	}
 #	define IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF (0xD0)
 #	define IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF (0xD8)
 	io_service_t aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"));
@@ -1036,10 +1041,6 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 		}
 		IOObjectRelease(aes_serv);
 	}
-#else
-	(void)nonce;
-	(void)entangled_nonce;
-#endif
 	return ret;
 }
 
@@ -1057,6 +1058,15 @@ dimentio_term(void) {
 
 kern_return_t
 dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_buf) {
+	#if TARGET_OS_OSX
+	isArm64e = true;
+	#else
+	cpu_subtype_t subtype;
+    size_t cpusz = sizeof(cpu_subtype_t);
+    sysctlbyname("hw.cpusubtype", &subtype, &cpusz, NULL, 0);
+    isArm64e = (subtype == CPU_SUBTYPE_ARM64E);
+    #endif
+
 	kslide = _kslide;
 	if(_kread_buf != NULL && _kwrite_buf != NULL) {
 		kread_buf = _kread_buf;
