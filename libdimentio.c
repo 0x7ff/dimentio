@@ -98,6 +98,8 @@ typedef mach_port_t io_object_t;
 typedef uint32_t IOOptionBits, ipc_entry_num_t;
 typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
 typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t);
+typedef int (*kernrw_0_req_kernrw_func_t)(void);
+typedef kern_return_t (*kernrw_0_kbase_func_t)(kaddr_t *), (*kernrw_0_kread_func_t)(kaddr_t, void *, size_t), (*kernrw_0_kwrite_func_t)(kaddr_t, const void *, size_t);
 
 typedef struct {
 	struct section_64 s64;
@@ -160,12 +162,16 @@ extern const mach_port_t kIOMasterPortDefault;
 static bool isArm64e;
 
 static void *krw_0;
+static void *kernrw_0;
 static int kmem_fd = -1;
 static kread_func_t kread_buf;
 static task_t tfp0 = TASK_NULL;
 static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
+static kernrw_0_req_kernrw_func_t kernrw_0_req;
+static kernrw_0_kread_func_t kernrw_0_kread;
+static kernrw_0_kwrite_func_t kernrw_0_kwrite;
 static kaddr_t kslide, kernproc, our_task;
 static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off;
 
@@ -299,6 +305,17 @@ kdecompress(const void *src, size_t src_len, size_t *dst_len) {
 		}
 	}
 	return NULL;
+}
+
+static kern_return_t
+kread_buf_kernrw_0(kaddr_t addr, void *buf, size_t sz) {
+	kern_return_t ret = kernrw_0_kread(addr, buf, sz);
+	return ret;
+}
+
+static kern_return_t
+kwrite_buf_kernrw_0(kaddr_t addr, const void *buf, size_t sz) {
+	return kernrw_0_kwrite(addr, buf, sz);
 }
 
 static kern_return_t
@@ -672,6 +689,7 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	kaddr_t kext_addr, kext_addr_slid;
 	task_dyld_info_data_t dyld_info;
 	krw_0_kbase_func_t krw_0_kbase;
+	kernrw_0_kbase_func_t kernrw_0_kbase;
 	char kext_name[KMOD_MAX_NAME];
 	struct mach_header_64 mh64;
 	CFStringRef kext_name_cf;
@@ -679,7 +697,9 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	CFArrayRef kext_names;
 
 	if(kslide == 0) {
-		if(krw_0 != NULL && (krw_0_kbase = (krw_0_kbase_func_t)dlsym(krw_0, "kbase")) != NULL && krw_0_kbase(&kslide) == 0) {
+		if(kernrw_0 != NULL && (kernrw_0_kbase = (kernrw_0_kbase_func_t)dlsym(kernrw_0, "kernRW_getKernelBase")) != NULL && kernrw_0_kbase(&kslide) == KERN_SUCCESS) {
+			kslide -= pfinder->base;
+		} else if(krw_0 != NULL && (krw_0_kbase = (krw_0_kbase_func_t)dlsym(krw_0, "kbase")) != NULL && krw_0_kbase(&kslide) == 0) {
 			kslide -= pfinder->base;
 		} else if(tfp0 == TASK_NULL || task_info(tfp0, TASK_DYLD_INFO, (task_info_t)&dyld_info, &cnt) != KERN_SUCCESS || (kslide = dyld_info.all_image_info_size) == 0) {
 			for(pri.pri_addr = 0; proc_pidinfo(0, PROC_PIDREGIONINFO, pri.pri_addr, &pri, sizeof(pri)) == sizeof(pri); pri.pri_addr += pri.pri_sz) {
@@ -716,7 +736,6 @@ pfinder_init_kbase(pfinder_t *pfinder) {
 	   ) {
 		pfinder->sec_text.s64.addr += kslide;
 		pfinder->sec_cstring.s64.addr += kslide;
-		printf("kbase: " KADDR_FMT ", kslide: " KADDR_FMT "\n", pfinder->base + kslide, kslide);
 		return KERN_SUCCESS;
 	}
 	return KERN_FAILURE;
@@ -1075,6 +1094,9 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 		printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 		kread_buf = kread_buf_tfp0;
 		kwrite_buf = kwrite_buf_tfp0;
+	} else if ((kernrw_0 = dlopen("/usr/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0 && (kernrw_0_kread = (kernrw_0_kread_func_t)dlsym(kernrw_0, "kernRW_readbuf")) != NULL && (kernrw_0_kwrite = (kernrw_0_kwrite_func_t)dlsym(kernrw_0, "kernRW_writebuf")) != NULL) {
+		kread_buf = kread_buf_kernrw_0;
+		kwrite_buf = kwrite_buf_kernrw_0;
 	} else if((krw_0 = dlopen("/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
 		kread_buf = kread_buf_krw_0;
 		kwrite_buf = kwrite_buf_krw_0;
