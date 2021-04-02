@@ -1089,12 +1089,12 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 			kread_buf = kread_buf_tfp0;
 			kwrite_buf = kwrite_buf_tfp0;
-		} else if((krw_0 = dlopen("/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
-			kread_buf = kread_buf_krw_0;
-			kwrite_buf = kwrite_buf_krw_0;
 		} else if((kernrw_0 = dlopen("/usr/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0 && (kernrw_0_kread = (kernrw_0_kread_func_t)dlsym(kernrw_0, "kernRW_readbuf")) != NULL && (kernrw_0_kwrite = (kernrw_0_kwrite_func_t)dlsym(kernrw_0, "kernRW_writebuf")) != NULL) {
 			kread_buf = kread_buf_kernrw_0;
 			kwrite_buf = kwrite_buf_kernrw_0;
+		} else if((krw_0 = dlopen("/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
+			kread_buf = kread_buf_krw_0;
+			kwrite_buf = kwrite_buf_krw_0;
 		} else if((kmem_fd = open("/dev/kmem", O_RDWR | O_CLOEXEC)) != -1) {
 			kread_buf = kread_buf_kmem;
 			kwrite_buf = kwrite_buf_kmem;
