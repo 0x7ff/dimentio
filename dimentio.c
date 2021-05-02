@@ -14,10 +14,6 @@
  */
 #include "libdimentio.h"
 
-#ifndef MIN
-#	define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-
 int
 main(int argc, char **argv) {
 	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
@@ -29,17 +25,18 @@ main(int argc, char **argv) {
 	if(argc != 1 && argc != 2) {
 		printf("Usage: %s [nonce]\n", argv[0]);
 	} else if((argc == 1 || sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) && dimentio_init(0, NULL, NULL) == KERN_SUCCESS) {
+        memset(entangled_nonce, 0, CC_SHA384_DIGEST_LENGTH);
 		if(dimentio(&nonce, argc == 2, entangled_nonce, &entangled) == KERN_SUCCESS) {
 			if(argc == 1) {
 				printf("Current nonce is 0x%016" PRIX64 "\n", nonce);
 			} else {
 				printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
 			}
-			if(entangled) {
-				printf("entangled_nonce: ");
-				for(i = 0; i < MIN(sizeof(entangled_nonce), 32); ++i) {
-					printf("%02" PRIX8, entangled_nonce[i]);
-				}
+			if(entangled_nonce[0] != 0) {
+				printf("apnonce: ");
+                for (i = 0; entangled_nonce[i] != 0; ++i) {
+                    printf("%02" PRIX8, entangled_nonce[i]);
+                }
 				putchar('\n');
 			}
 			ret = 0;
