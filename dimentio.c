@@ -33,11 +33,11 @@ main(int argc, char **argv) {
 				printf("Set nonce to 0x%016" PRIX64 "\n", nonce);
 			}
 			if(entangled_nonce[0] != 0) {
-                if(entangled) {
-                    printf("entangled_apnonce: ");
-                } else {
-                    printf("apnonce: ");
-                }
+				if(entangled) {
+					printf("entangled_apnonce: ");
+				} else {
+					printf("apnonce: ");
+				}
 				for (i = 0; entangled_nonce[i] != 0; ++i) {
 					printf("%02" PRIX8, entangled_nonce[i]);
 				}
