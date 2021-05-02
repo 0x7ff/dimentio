@@ -25,7 +25,6 @@ main(int argc, char **argv) {
 	if(argc != 1 && argc != 2) {
 		printf("Usage: %s [nonce]\n", argv[0]);
 	} else if((argc == 1 || sscanf(argv[1], "0x%016" PRIx64, &nonce) == 1) && dimentio_init(0, NULL, NULL) == KERN_SUCCESS) {
-		memset(entangled_nonce, 0, CC_SHA384_DIGEST_LENGTH);
 		if(dimentio(&nonce, argc == 2, entangled_nonce, &entangled) == KERN_SUCCESS) {
 			if(argc == 1) {
 				printf("Current nonce is 0x%016" PRIX64 "\n", nonce);
