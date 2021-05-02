@@ -1026,50 +1026,50 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 	size_t out_sz;
 
 	if(t1sz_boot != 0) {
-        if ((aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"))) != IO_OBJECT_NULL) {
-            printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
-            if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
-                kxpacd(&aes_object);
-                printf("aes_object: " KADDR_FMT "\n", aes_object);
-                if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
-                    printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
-                    if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
-                        printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
-                        while(key_cnt-- != 0 && kread_buf(keys_ptr + key_cnt * sizeof(key), &key, sizeof(key)) == KERN_SUCCESS) {
-                            printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
-                            if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
-                                if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
-                                    CC_SHA384(buf, sizeof(buf), entangled_nonce);
-                                    ret = true;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            IOObjectRelease(aes_serv);
-        }
-    } else {
-        io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/chosen");
-        if (MACH_PORT_VALID(chosen)) {
-            CFDataRef hash = IORegistryEntryCreateCFProperty(chosen, CFSTR("crypto-hash-method"), kCFAllocatorDefault, 0);
-            IOObjectRelease(chosen);
-            if (hash != nil) {
-                if (CFGetTypeID(hash) == CFDataGetTypeID()) {
-                    CFStringRef cryptoHashMethod = CFStringCreateFromExternalRepresentation(NULL, hash, kCFStringEncodingUTF8);
-                    CFRelease(hash);
-                    if (CFStringCompare(cryptoHashMethod, CFSTR("sha1\0"), 0) == kCFCompareEqualTo) {
-                        CC_SHA1(&nonce, sizeof(nonce), entangled_nonce);
-                    } else if (CFStringCompare(cryptoHashMethod, CFSTR("sha2-384\0"), 0) == kCFCompareEqualTo) {
-                        CC_SHA384(&nonce, sizeof(nonce), entangled_nonce);
-                    }
-                } else {
-                    CFRelease(hash);
-                }
-            }
-        }
-    }
+		if ((aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"))) != IO_OBJECT_NULL) {
+			printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
+			if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
+				kxpacd(&aes_object);
+				printf("aes_object: " KADDR_FMT "\n", aes_object);
+				if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
+					printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
+					if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
+						printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
+						while(key_cnt-- != 0 && kread_buf(keys_ptr + key_cnt * sizeof(key), &key, sizeof(key)) == KERN_SUCCESS) {
+							printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
+							if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
+								if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
+									CC_SHA384(buf, sizeof(buf), entangled_nonce);
+									ret = true;
+								}
+								break;
+							}
+						}
+					}
+				}
+			}
+			IOObjectRelease(aes_serv);
+		}
+	} else {
+		io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/chosen");
+		if (MACH_PORT_VALID(chosen)) {
+			CFDataRef hash = IORegistryEntryCreateCFProperty(chosen, CFSTR("crypto-hash-method"), kCFAllocatorDefault, 0);
+			IOObjectRelease(chosen);
+			if (hash != nil) {
+				if (CFGetTypeID(hash) == CFDataGetTypeID()) {
+					CFStringRef cryptoHashMethod = CFStringCreateFromExternalRepresentation(NULL, hash, kCFStringEncodingUTF8);
+					CFRelease(hash);
+					if (CFStringCompare(cryptoHashMethod, CFSTR("sha1\0"), 0) == kCFCompareEqualTo) {
+						CC_SHA1(&nonce, sizeof(nonce), entangled_nonce);
+					} else if (CFStringCompare(cryptoHashMethod, CFSTR("sha2-384\0"), 0) == kCFCompareEqualTo) {
+						CC_SHA384(&nonce, sizeof(nonce), entangled_nonce);
+					}
+				} else {
+					CFRelease(hash);
+				}
+			}
+		}
+	}
 	return ret;
 }
 
