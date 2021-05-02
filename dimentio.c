@@ -38,7 +38,7 @@ main(int argc, char **argv) {
 				} else {
 					printf("apnonce: ");
 				}
-				for (i = 0; entangled_nonce[i] != 0; ++i) {
+				for (i = 0; entangled_nonce[i] != 0 && i < 32; ++i) {
 					printf("%02" PRIX8, entangled_nonce[i]);
 				}
 				putchar('\n');
