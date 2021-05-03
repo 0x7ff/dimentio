@@ -16,7 +16,7 @@
 
 int
 main(int argc, char **argv) {
-	uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH];
+    uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH] = {0};
 	int ret = EXIT_FAILURE;
 	uint64_t nonce;
 	bool entangled;
