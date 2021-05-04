@@ -1018,11 +1018,14 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 	struct {
 		uint32_t generated, key_id, key_sz, val[4], key[4], zero, pad;
 	} key;
+	CFStringRef crypto_hash_method;
 	uint64_t buf[] = { 0, nonce };
 	kaddr_t aes_object, keys_ptr;
+	io_registry_entry_t chosen;
 	io_service_t aes_serv;
 	uint32_t key_cnt;
 	bool ret = false;
+	CFDataRef hash;
 	size_t out_sz;
 
 	if(t1sz_boot != 0) {
@@ -1051,23 +1054,20 @@ entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH])
 			IOObjectRelease(aes_serv);
 		}
 	} else {
-		io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/chosen");
-		if (MACH_PORT_VALID(chosen)) {
-			CFDataRef hash = IORegistryEntryCreateCFProperty(chosen, CFSTR("crypto-hash-method"), kCFAllocatorDefault, 0);
-			IOObjectRelease(chosen);
-			if (hash != nil) {
+		if ((chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen")) != IO_OBJECT_NULL) {
+			if ((hash = IORegistryEntryCreateCFProperty(chosen, CFSTR("crypto-hash-method"), kCFAllocatorDefault, kNilOptions)) != NULL) {
 				if (CFGetTypeID(hash) == CFDataGetTypeID()) {
-					CFStringRef cryptoHashMethod = CFStringCreateFromExternalRepresentation(NULL, hash, kCFStringEncodingUTF8);
-					CFRelease(hash);
-					if (CFStringCompare(cryptoHashMethod, CFSTR("sha1\0"), 0) == kCFCompareEqualTo) {
+					crypto_hash_method = CFStringCreateFromExternalRepresentation(NULL, hash, kCFStringEncodingUTF8);
+					if (CFStringCompare(crypto_hash_method, CFSTR("sha1\0"), 0) == kCFCompareEqualTo) {
 						CC_SHA1(&nonce, sizeof(nonce), entangled_nonce);
-					} else if (CFStringCompare(cryptoHashMethod, CFSTR("sha2-384\0"), 0) == kCFCompareEqualTo) {
+					} else if (CFStringCompare(crypto_hash_method, CFSTR("sha2-384\0"), 0) == kCFCompareEqualTo) {
 						CC_SHA384(&nonce, sizeof(nonce), entangled_nonce);
 					}
-				} else {
-					CFRelease(hash);
+					CFRelease(crypto_hash_method);
 				}
+				CFRelease(hash);
 			}
+			IOObjectRelease(chosen);
 		}
 	}
 	return ret;
