@@ -27,5 +27,8 @@ kern_return_t
 dimentio_init(kaddr_t, kread_func_t, kwrite_func_t);
 
 kern_return_t
-dimentio(uint64_t *, bool, uint8_t[CC_SHA384_DIGEST_LENGTH], bool *);
+dimentio(uint64_t *, bool, uint8_t[CC_SHA384_DIGEST_LENGTH], size_t *);
+
+kern_return_t
+dimentio_preinit(uint64_t *, bool, uint8_t[CC_SHA384_DIGEST_LENGTH], size_t *);
 #endif

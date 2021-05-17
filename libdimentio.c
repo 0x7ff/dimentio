@@ -78,6 +78,7 @@
 #define LDR_X_UNSIGNED_IMM(a) (extract32(a, 10, 12) << 3U)
 #define kBootNoncePropertyKey "com.apple.System.boot-nonce"
 #define kIONVRAMDeletePropertyKey "IONVRAM-DELETE-PROPERTY"
+#define kIONVRAMSyncNowPropertyKey "IONVRAM-SYNCNOW-PROPERTY"
 #define IS_LDR_W_UNSIGNED_IMM(a) (((a) & 0xFFC00000U) == 0xB9400000U)
 #define IS_LDR_X_UNSIGNED_IMM(a) (((a) & 0xFFC00000U) == 0xF9400000U)
 #define ADR_IMM(a) ((sextract64(a, 5, 19) << 2U) | extract32(a, 29, 2))
@@ -98,8 +99,8 @@
 typedef char io_string_t[512];
 typedef mach_port_t io_object_t;
 typedef uint32_t IOOptionBits, ipc_entry_num_t;
+typedef kern_return_t (*kernrw_0_kbase_func_t)(kaddr_t *);
 typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
-typedef kern_return_t (*kernrw_0_kbase_func_t)(kaddr_t *), (*kernrw_0_kread_func_t)(kaddr_t, void *, size_t), (*kernrw_0_kwrite_func_t)(kaddr_t, const void *, size_t);
 typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t), (*kernrw_0_req_kernrw_func_t)(void);
 
 typedef struct {
@@ -169,8 +170,6 @@ static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
 static kaddr_t kslide, kernproc, our_task;
-static kernrw_0_kread_func_t kernrw_0_kread;
-static kernrw_0_kwrite_func_t kernrw_0_kwrite;
 static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off;
 
 static uint32_t
@@ -301,16 +300,6 @@ kdecompress(const void *src, size_t src_len, size_t *dst_len) {
 		}
 	}
 	return NULL;
-}
-
-static kern_return_t
-kread_buf_kernrw_0(kaddr_t addr, void *buf, size_t sz) {
-	return kernrw_0_kread(addr, buf, sz);
-}
-
-static kern_return_t
-kwrite_buf_kernrw_0(kaddr_t addr, const void *buf, size_t sz) {
-	return kernrw_0_kwrite(addr, buf, sz);
 }
 
 static kern_return_t
@@ -916,15 +905,15 @@ nonce_generate(void) {
 	uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH];
 	kern_return_t ret = KERN_FAILURE;
 	io_connect_t nonce_conn;
-	size_t sz;
+	size_t nonce_d_sz;
 
 	if(nonce_serv != IO_OBJECT_NULL) {
 		printf("nonce_serv: 0x%" PRIX32 "\n", nonce_serv);
 		if(IOServiceOpen(nonce_serv, mach_task_self(), 0, &nonce_conn) == KERN_SUCCESS) {
 			printf("nonce_conn: 0x%" PRIX32 "\n", nonce_conn);
 			if(IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_CLEAR_NONCE_SEL, NULL, 0, NULL, NULL) == KERN_SUCCESS) {
-				sz = sizeof(nonce_d);
-				ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &sz);
+				nonce_d_sz = sizeof(nonce_d);
+				ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
 			}
 			IOServiceClose(nonce_conn);
 		}
@@ -991,6 +980,23 @@ lookup_key_in_os_dict(kaddr_t os_dict, const char *key) {
 }
 
 static kern_return_t
+get_nvram_prop(io_registry_entry_t nvram_entry, const char *key, char *val, CFIndex val_sz) {
+	CFStringRef cf_key = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, key, kCFStringEncodingUTF8, kCFAllocatorNull), cf_val;
+	kern_return_t ret = KERN_FAILURE;
+
+	if(cf_key != NULL) {
+		if((cf_val = IORegistryEntryCreateCFProperty(nvram_entry, cf_key, kCFAllocatorDefault, kNilOptions)) != NULL) {
+			if(CFGetTypeID(cf_val) == CFStringGetTypeID() && CFStringGetCString(cf_val, val, val_sz, kCFStringEncodingUTF8)) {
+				ret = KERN_SUCCESS;
+			}
+			CFRelease(cf_val);
+		}
+		CFRelease(cf_key);
+	}
+	return ret;
+}
+
+static kern_return_t
 set_nvram_prop(io_registry_entry_t nvram_entry, const char *key, const char *val) {
 	CFStringRef cf_key = CFStringCreateWithCStringNoCopy(kCFAllocatorDefault, key, kCFStringEncodingUTF8, kCFAllocatorNull), cf_val;
 	kern_return_t ret = KERN_FAILURE;
@@ -1013,41 +1019,82 @@ sync_nonce(io_registry_entry_t nvram_entry) {
 	return KERN_FAILURE;
 }
 
-static bool
-entangle_nonce(uint64_t nonce, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH]) {
+static size_t
+hash_nonce(uint64_t nonce, uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH]) {
+	io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen");
 	struct {
 		uint32_t generated, key_id, key_sz, val[4], key[4], zero, pad;
 	} key;
+	size_t out_sz, nonce_d_sz = 0, hash_method_len;
 	uint64_t buf[] = { 0, nonce };
 	kaddr_t aes_object, keys_ptr;
+	CFDataRef hash_method_cf;
+	const char *hash_method;
 	io_service_t aes_serv;
 	uint32_t key_cnt;
-	bool ret = false;
-	size_t out_sz;
 
-	if(t1sz_boot != 0 && (aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"))) != IO_OBJECT_NULL) {
-		printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
-		if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
-			kxpacd(&aes_object);
-			printf("aes_object: " KADDR_FMT "\n", aes_object);
-			if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
-				printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
-				if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
-					printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
-					while(key_cnt-- != 0 && kread_buf(keys_ptr + key_cnt * sizeof(key), &key, sizeof(key)) == KERN_SUCCESS) {
-						printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
-						if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
-							if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
-								CC_SHA384(buf, sizeof(buf), entangled_nonce);
-								ret = true;
+	if(chosen != IO_OBJECT_NULL) {
+		if((hash_method_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("crypto-hash-method"), kCFAllocatorDefault, kNilOptions)) != NULL) {
+			if(CFGetTypeID(hash_method_cf) == CFDataGetTypeID() && (hash_method_len = (size_t)CFDataGetLength(hash_method_cf)) != 0 && (hash_method = (const char *)CFDataGetBytePtr(hash_method_cf))[hash_method_len - 1] == '\0') {
+				if(strcmp(hash_method, "sha1") == 0) {
+					nonce_d_sz = CC_SHA1_DIGEST_LENGTH;
+					CC_SHA1(&nonce, sizeof(nonce), nonce_d);
+				} else if(strcmp(hash_method, "sha2-384") == 0) {
+					nonce_d_sz = CC_SHA384_DIGEST_LENGTH;
+					if(t1sz_boot == 0) {
+						CC_SHA384(&nonce, sizeof(nonce), nonce_d);
+					} else if((aes_serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOAESAccelerator"))) != IO_OBJECT_NULL) {
+						printf("aes_serv: 0x%" PRIX32 "\n", aes_serv);
+						if(lookup_io_object(aes_serv, &aes_object) == KERN_SUCCESS) {
+							kxpacd(&aes_object);
+							printf("aes_object: " KADDR_FMT "\n", aes_object);
+							if(kread_addr(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEYS_OFF, &keys_ptr) == KERN_SUCCESS) {
+								printf("keys_ptr: " KADDR_FMT "\n", keys_ptr);
+								if(kread_buf(aes_object + IO_AES_ACCELERATOR_SPECIAL_KEY_CNT_OFF, &key_cnt, sizeof(key_cnt)) == KERN_SUCCESS) {
+									printf("key_cnt: 0x%" PRIX32 "\n", key_cnt);
+									while(key_cnt-- != 0 && kread_buf(keys_ptr + key_cnt * sizeof(key), &key, sizeof(key)) == KERN_SUCCESS) {
+										printf("generated: 0x%" PRIX32 ", key_id: 0x%" PRIX32 ", key_sz: 0x%" PRIX32 ", val: 0x%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "%08" PRIX32 "\n", key.generated, key.key_id, key.key_sz, key.val[0], key.val[1], key.val[2], key.val[3]);
+										if(key.generated == 1 && key.key_id == 0x8A3 && key.key_sz == 8 * kCCKeySizeAES128) {
+											if(CCCrypt(kCCEncrypt, kCCAlgorithmAES128, 0, key.val, kCCKeySizeAES128, NULL, buf, sizeof(buf), buf, sizeof(buf), &out_sz) == kCCSuccess && out_sz == sizeof(buf)) {
+												CC_SHA384(buf, sizeof(buf), nonce_d);
+											}
+											break;
+										}
+									}
+								}
 							}
-							break;
 						}
+						IOObjectRelease(aes_serv);
 					}
 				}
 			}
+			CFRelease(hash_method_cf);
 		}
-		IOObjectRelease(aes_serv);
+		IOObjectRelease(chosen);
+	}
+	return MIN(nonce_d_sz, 32);
+}
+
+kern_return_t
+dimentio_preinit(uint64_t *nonce, bool set, uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH], size_t *nonce_d_sz) {
+	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
+	char nonce_hex[2 * sizeof(*nonce) + sizeof("0x")];
+	kern_return_t ret = KERN_FAILURE;
+
+	if(nvram_entry != IO_OBJECT_NULL) {
+		printf("nvram_entry: 0x%" PRIX32 "\n", nvram_entry);
+		if(set) {
+			snprintf(nonce_hex, sizeof(nonce_hex), "0x%016" PRIx64, *nonce);
+			if(set_nvram_prop(nvram_entry, kBootNoncePropertyKey, nonce_hex) == KERN_SUCCESS && set_nvram_prop(nvram_entry, kIONVRAMSyncNowPropertyKey, kBootNoncePropertyKey) == KERN_SUCCESS) {
+				ret = set_nvram_prop(nvram_entry, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
+			}
+		} else if(get_nvram_prop(nvram_entry, kBootNoncePropertyKey, nonce_hex, sizeof(nonce_hex)) == KERN_SUCCESS && sscanf(nonce_hex, "0x%016" PRIx64, nonce) == 1) {
+			ret = KERN_SUCCESS;
+		}
+		if(ret == KERN_SUCCESS) {
+			*nonce_d_sz = hash_nonce(*nonce, nonce_d);
+		}
+		IOObjectRelease(nvram_entry);
 	}
 	return ret;
 }
@@ -1089,9 +1136,9 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 			kread_buf = kread_buf_tfp0;
 			kwrite_buf = kwrite_buf_tfp0;
-		} else if((kernrw_0 = dlopen("/usr/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0 && (kernrw_0_kread = (kernrw_0_kread_func_t)dlsym(kernrw_0, "kernRW_readbuf")) != NULL && (kernrw_0_kwrite = (kernrw_0_kwrite_func_t)dlsym(kernrw_0, "kernRW_writebuf")) != NULL) {
-			kread_buf = kread_buf_kernrw_0;
-			kwrite_buf = kwrite_buf_kernrw_0;
+		} else if((kernrw_0 = dlopen("/usr/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0) {
+			kread_buf = (kread_func_t)dlsym(kernrw_0, "kernRW_readbuf");
+			kwrite_buf = (kwrite_func_t)dlsym(kernrw_0, "kernRW_writebuf");
 		} else if((krw_0 = dlopen("/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
 			kread_buf = kread_buf_krw_0;
 			kwrite_buf = kwrite_buf_krw_0;
@@ -1119,7 +1166,7 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 }
 
 kern_return_t
-dimentio(uint64_t *nonce, bool set, uint8_t entangled_nonce[CC_SHA384_DIGEST_LENGTH], bool *entangled) {
+dimentio(uint64_t *nonce, bool set, uint8_t nonce_d[CC_SHA384_DIGEST_LENGTH], size_t *nonce_d_sz) {
 	io_registry_entry_t nvram_entry = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/options");
 	char nonce_hex[2 * sizeof(*nonce) + sizeof("0x")];
 	kaddr_t of_dict, os_string, string_ptr;
@@ -1146,7 +1193,7 @@ dimentio(uint64_t *nonce, bool set, uint8_t entangled_nonce[CC_SHA384_DIGEST_LEN
 							ret = KERN_SUCCESS;
 						}
 						if(ret == KERN_SUCCESS) {
-							*entangled = entangle_nonce(*nonce, entangled_nonce);
+							*nonce_d_sz = hash_nonce(*nonce, nonce_d);
 						}
 					}
 				} else if(!set) {
