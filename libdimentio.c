@@ -374,20 +374,14 @@ static kern_return_t
 kread_buf_kmem(kaddr_t addr, void *buf, size_t sz) {
 	ssize_t n = pread(kmem_fd, buf, sz, (off_t)addr);
 
-	if(n > 0 && (size_t)n == sz) {
-		return KERN_SUCCESS;
-	}
-	return KERN_FAILURE;
+	return n > 0 && (size_t)n == sz ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 static kern_return_t
 kwrite_buf_kmem(kaddr_t addr, const void *buf, size_t sz) {
 	ssize_t n = pwrite(kmem_fd, buf, sz, (off_t)addr);
 
-	if(n > 0 && (size_t)n == sz) {
-		return KERN_SUCCESS;
-	}
-	return KERN_FAILURE;
+	return n > 0 && (size_t)n == sz ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 static kern_return_t
@@ -739,36 +733,38 @@ get_boot_path(void) {
 	struct stat stat_buf;
 	char *path = NULL;
 
-	if(stat(BOOT_PATH, &stat_buf) != -1 && S_ISREG(stat_buf.st_mode)) {
-		path = malloc(path_len);
-	} else if(stat(PREBOOT_PATH, &stat_buf) != -1 && S_ISDIR(stat_buf.st_mode) && (chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen")) != IO_OBJECT_NULL) {
-		path_len += strlen(PREBOOT_PATH);
+	if(stat(PREBOOT_PATH, &stat_buf) != -1 && S_ISDIR(stat_buf.st_mode)) {
+		if((chosen = IORegistryEntryFromPath(kIOMasterPortDefault, kIODeviceTreePlane ":/chosen")) != IO_OBJECT_NULL) {
+			path_len += strlen(PREBOOT_PATH);
 #if TARGET_OS_OSX
-		if((boot_objects_path_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-objects-path"), kCFAllocatorDefault, kNilOptions)) != NULL) {
-			if(CFGetTypeID(boot_objects_path_cf) == CFDataGetTypeID() && (boot_objects_path_len = (size_t)CFDataGetLength(boot_objects_path_cf) - 1) != 0) {
-				path_len += boot_objects_path_len;
-				if((path = malloc(path_len)) != NULL) {
-					memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
-					memcpy(path + strlen(PREBOOT_PATH), CFDataGetBytePtr(boot_objects_path_cf), boot_objects_path_len);
-				}
-			}
-			CFRelease(boot_objects_path_cf);
-		}
-#else
-		if((hash_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, kNilOptions)) != NULL) {
-			if(CFGetTypeID(hash_cf) == CFDataGetTypeID() && (hash_len = (size_t)CFDataGetLength(hash_cf) << 1U) != 0) {
-				path_len += hash_len;
-				if((path = malloc(path_len)) != NULL) {
-					memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
-					for(hash = CFDataGetBytePtr(hash_cf); hash_len-- != 0; ) {
-						path[strlen(PREBOOT_PATH) + hash_len] = "0123456789ABCDEF"[(hash[hash_len >> 1U] >> ((~hash_len & 1U) << 2U)) & 0xFU];
+			if((boot_objects_path_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-objects-path"), kCFAllocatorDefault, kNilOptions)) != NULL) {
+				if(CFGetTypeID(boot_objects_path_cf) == CFDataGetTypeID() && (boot_objects_path_len = (size_t)CFDataGetLength(boot_objects_path_cf) - 1) != 0) {
+					path_len += boot_objects_path_len;
+					if((path = malloc(path_len)) != NULL) {
+						memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
+						memcpy(path + strlen(PREBOOT_PATH), CFDataGetBytePtr(boot_objects_path_cf), boot_objects_path_len);
 					}
 				}
+				CFRelease(boot_objects_path_cf);
 			}
-			CFRelease(hash_cf);
-		}
+#else
+			if((hash_cf = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, kNilOptions)) != NULL) {
+				if(CFGetTypeID(hash_cf) == CFDataGetTypeID() && (hash_len = (size_t)CFDataGetLength(hash_cf) << 1U) != 0) {
+					path_len += hash_len;
+					if((path = malloc(path_len)) != NULL) {
+						memcpy(path, PREBOOT_PATH, strlen(PREBOOT_PATH));
+						for(hash = CFDataGetBytePtr(hash_cf); hash_len-- != 0; ) {
+							path[strlen(PREBOOT_PATH) + hash_len] = "0123456789ABCDEF"[(hash[hash_len >> 1U] >> ((~hash_len & 1U) << 2U)) & 0xFU];
+						}
+					}
+				}
+				CFRelease(hash_cf);
+			}
 #endif
-		IOObjectRelease(chosen);
+			IOObjectRelease(chosen);
+		}
+	} else if(stat(BOOT_PATH, &stat_buf) != -1 && S_ISREG(stat_buf.st_mode)) {
+		path = malloc(path_len);
 	}
 	if(path != NULL) {
 		memcpy(path + (path_len - sizeof(BOOT_PATH)), BOOT_PATH, sizeof(BOOT_PATH));
