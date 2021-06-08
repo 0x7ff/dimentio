@@ -1,4 +1,4 @@
-/* Copyright 2020 0x7ff
+/* Copyright 2021 0x7ff
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,9 +35,7 @@
 #define IPC_ENTRY_IE_OBJECT_OFF (0x0)
 #define PROC_P_LIST_LE_PREV_OFF (0x8)
 #define OS_DICTIONARY_COUNT_OFF (0x14)
-#define IPC_PORT_IP_KOBJECT_OFF (0x68)
 #define PROC_P_LIST_LH_FIRST_OFF (0x0)
-#define IPC_SPACE_IS_TABLE_SZ_OFF (0x14)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
 #define OS_STRING_LEN(a) extract32(a, 14, 18)
 #define LOADED_KEXT_SUMMARY_HDR_NAME_OFF (0x10)
@@ -170,7 +168,7 @@ static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
 static kaddr_t kslide, kernproc, our_task;
-static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off;
+static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off, ipc_port_ip_kobject_off;
 
 static uint32_t
 extract32(uint32_t val, unsigned start, unsigned len) {
@@ -645,7 +643,10 @@ pfinder_kernproc(pfinder_t pfinder) {
 	if(ref != 0) {
 		return ref;
 	}
-	for(ref = pfinder_xref_str(pfinder, "\"Should never have an EVFILT_READ except for reg or fifo.\"", 0); sec_read_buf(pfinder.sec_text, ref, insns, sizeof(insns)) == KERN_SUCCESS; ref -= sizeof(*insns)) {
+	if((ref = pfinder_xref_str(pfinder, "\"Should never have an EVFILT_READ except for reg or fifo.\"", 0)) == 0) {
+		ref = pfinder_xref_str(pfinder, "Should never have an EVFILT_READ except for reg or fifo. @%s:%d", 0);
+	}
+	for(; sec_read_buf(pfinder.sec_text, ref, insns, sizeof(insns)) == KERN_SUCCESS; ref -= sizeof(*insns)) {
 		if(IS_ADRP(insns[0]) && IS_LDR_X_UNSIGNED_IMM(insns[1]) && RD(insns[1]) == 3) {
 			return pfinder_xref_rd(pfinder, RD(insns[1]), ref, 0);
 		}
@@ -787,6 +788,7 @@ pfinder_init_offsets(void) {
 			proc_p_pid_off = 0x10;
 			task_itk_space_off = 0x290;
 			io_dt_nvram_of_dict_off = 0xC0;
+			ipc_port_ip_kobject_off = 0x68;
 			if(CFStringCompare(cf_str, CFSTR("3789.1.24"), kCFCompareNumerically) != kCFCompareLessThan) {
 				task_itk_space_off = 0x300;
 				if(CFStringCompare(cf_str, CFSTR("4397.0.0.2.4"), kCFCompareNumerically) != kCFCompareLessThan) {
@@ -818,6 +820,10 @@ pfinder_init_offsets(void) {
 												task_itk_space_off = 0x340;
 												if(CFStringCompare(cf_str, CFSTR("7195.100.326.0.1"), kCFCompareNumerically) != kCFCompareLessThan) {
 													task_itk_space_off = 0x338;
+													if(CFStringCompare(cf_str, CFSTR("7938.0.0.111.2"), kCFCompareNumerically) != kCFCompareLessThan) {
+														task_itk_space_off = 0x330;
+														ipc_port_ip_kobject_off = 0x58;
+													}
 												}
 											}
 										}
@@ -865,19 +871,15 @@ find_task(pid_t pid, kaddr_t *task) {
 
 static kern_return_t
 lookup_ipc_port(mach_port_name_t port_name, kaddr_t *ipc_port) {
-	ipc_entry_num_t port_idx, is_table_sz;
 	kaddr_t itk_space, is_table;
 
 	if(MACH_PORT_VALID(port_name) && kread_addr(our_task + task_itk_space_off, &itk_space) == KERN_SUCCESS) {
 		kxpacd(&itk_space);
 		printf("itk_space: " KADDR_FMT "\n", itk_space);
-		if(kread_buf(itk_space + IPC_SPACE_IS_TABLE_SZ_OFF, &is_table_sz, sizeof(is_table_sz)) == KERN_SUCCESS) {
-			printf("is_table_sz: 0x%" PRIX32 "\n", is_table_sz);
-			if((port_idx = MACH_PORT_INDEX(port_name)) < is_table_sz && kread_addr(itk_space + IPC_SPACE_IS_TABLE_OFF, &is_table) == KERN_SUCCESS) {
-				kxpacd(&is_table);
-				printf("is_table: " KADDR_FMT "\n", is_table);
-				return kread_addr(is_table + port_idx * IPC_ENTRY_SZ + IPC_ENTRY_IE_OBJECT_OFF, ipc_port);
-			}
+		if(kread_addr(itk_space + IPC_SPACE_IS_TABLE_OFF, &is_table) == KERN_SUCCESS) {
+			kxpacd(&is_table);
+			printf("is_table: " KADDR_FMT "\n", is_table);
+			return kread_addr(is_table + MACH_PORT_INDEX(port_name) * IPC_ENTRY_SZ + IPC_ENTRY_IE_OBJECT_OFF, ipc_port);
 		}
 	}
 	return KERN_FAILURE;
@@ -890,7 +892,7 @@ lookup_io_object(io_object_t object, kaddr_t *ip_kobject) {
 	if(lookup_ipc_port(object, &ipc_port) == KERN_SUCCESS) {
 		kxpacd(&ipc_port);
 		printf("ipc_port: " KADDR_FMT "\n", ipc_port);
-		return kread_addr(ipc_port + IPC_PORT_IP_KOBJECT_OFF, ip_kobject);
+		return kread_addr(ipc_port + ipc_port_ip_kobject_off, ip_kobject);
 	}
 	return KERN_FAILURE;
 }
