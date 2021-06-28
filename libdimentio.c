@@ -95,8 +95,8 @@
 #endif
 
 typedef char io_string_t[512];
+typedef uint32_t IOOptionBits;
 typedef mach_port_t io_object_t;
-typedef uint32_t IOOptionBits, ipc_entry_num_t;
 typedef kern_return_t (*kernrw_0_kbase_func_t)(kaddr_t *);
 typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
 typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t), (*kernrw_0_req_kernrw_func_t)(void);
@@ -643,8 +643,8 @@ pfinder_kernproc(pfinder_t pfinder) {
 	if(ref != 0) {
 		return ref;
 	}
-	if((ref = pfinder_xref_str(pfinder, "\"Should never have an EVFILT_READ except for reg or fifo.\"", 0)) == 0) {
-		ref = pfinder_xref_str(pfinder, "Should never have an EVFILT_READ except for reg or fifo. @%s:%d", 0);
+	if((ref = pfinder_xref_str(pfinder, "Should never have an EVFILT_READ except for reg or fifo. @%s:%d", 0)) == 0) {
+		ref = pfinder_xref_str(pfinder, "\"Should never have an EVFILT_READ except for reg or fifo.\"", 0);
 	}
 	for(; sec_read_buf(pfinder.sec_text, ref, insns, sizeof(insns)) == KERN_SUCCESS; ref -= sizeof(*insns)) {
 		if(IS_ADRP(insns[0]) && IS_LDR_X_UNSIGNED_IMM(insns[1]) && RD(insns[1]) == 3) {
