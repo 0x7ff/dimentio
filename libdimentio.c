@@ -823,6 +823,13 @@ pfinder_init_offsets(void) {
 													if(CFStringCompare(cf_str, CFSTR("7938.0.0.111.2"), kCFCompareNumerically) != kCFCompareLessThan) {
 														task_itk_space_off = 0x330;
 														ipc_port_ip_kobject_off = 0x58;
+														if(CFStringCompare(cf_str, CFSTR("8019.0.46.0.4"), kCFCompareNumerically) != kCFCompareLessThan) {
+#if TARGET_OS_OSX
+															io_dt_nvram_of_dict_off = 0xF0;
+#else
+															io_dt_nvram_of_dict_off = 0xD0;
+#endif
+														}
 													}
 												}
 											}
