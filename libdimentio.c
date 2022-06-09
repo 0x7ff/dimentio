@@ -72,6 +72,7 @@
 #define IS_ADRP(a) (((a) & 0x9F000000U) == 0x90000000U)
 #define IS_LDR_X(a) (((a) & 0xFF000000U) == 0x58000000U)
 #define IS_ADD_X(a) (((a) & 0xFFC00000U) == 0x91000000U)
+#define IS_SUBS_X(a) (((a) & 0xFF200000U) == 0xEB000000U)
 #define LDR_W_UNSIGNED_IMM(a) (extract32(a, 10, 12) << 2U)
 #define LDR_X_UNSIGNED_IMM(a) (extract32(a, 10, 12) << 3U)
 #define kBootNoncePropertyKey "com.apple.System.boot-nonce"
@@ -163,11 +164,13 @@ static int kmem_fd = -1;
 static unsigned t1sz_boot;
 static void *krw_0, *kernrw_0;
 static kread_func_t kread_buf;
+static bool has_proc_struct_sz;
 static task_t tfp0 = TASK_NULL;
+static uint64_t proc_struct_sz;
 static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
-static kaddr_t kslide, kernproc, our_task;
+static kaddr_t kslide, kernproc, proc_struct_sz_ptr, our_task;
 static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off, ipc_port_ip_kobject_off;
 
 static uint32_t
@@ -655,6 +658,22 @@ pfinder_kernproc(pfinder_t pfinder) {
 }
 
 static kaddr_t
+pfinder_proc_struct_sz_ptr(pfinder_t pfinder) {
+	kaddr_t ref = pfinder_sym(pfinder, "_proc_struct_size");
+	uint32_t insns[3];
+
+	if(ref != 0) {
+		return ref;
+	}
+	for(ref = pfinder_xref_str(pfinder, "panic: ticket lock acquired check done outside of kernel debugger @%s:%d", 0); sec_read_buf(pfinder.sec_text, ref, insns, sizeof(insns)) == KERN_SUCCESS; ref -= sizeof(*insns)) {
+		if(IS_ADRP(insns[0]) && IS_LDR_X_UNSIGNED_IMM(insns[1]) && IS_SUBS_X(insns[2]) && RD(insns[2]) == 1) {
+			return pfinder_xref_rd(pfinder, RD(insns[1]), ref, 0);
+		}
+	}
+	return 0;
+}
+
+static kaddr_t
 pfinder_init_kbase(pfinder_t *pfinder) {
 	struct {
 		uint32_t pri_prot, pri_max_prot, pri_inheritance, pri_flags;
@@ -838,6 +857,11 @@ pfinder_init_offsets(void) {
 																	io_dt_nvram_of_dict_off = 0xB8;
 #endif
 																	ipc_port_ip_kobject_off = 0x48;
+																	if(CFStringCompare(cf_str, CFSTR("8792.0.50.111.3"), kCFCompareNumerically) != kCFCompareLessThan) {
+																		proc_p_pid_off = 0x60;
+																		has_proc_struct_sz = true;
+																		task_itk_space_off = 0x300;
+																	}
 																}
 															}
 														}
@@ -858,7 +882,12 @@ pfinder_init_offsets(void) {
 				if(pfinder_init_file(&pfinder, boot_path) == KERN_SUCCESS) {
 					if(pfinder_init_kbase(&pfinder) == KERN_SUCCESS && (kernproc = pfinder_kernproc(pfinder)) != 0) {
 						printf("kernproc: " KADDR_FMT "\n", kernproc);
-						ret = KERN_SUCCESS;
+						if(!has_proc_struct_sz) {
+							ret = KERN_SUCCESS;
+						} else if((proc_struct_sz_ptr = pfinder_proc_struct_sz_ptr(pfinder)) != 0) {
+							printf("proc_struct_sz_ptr: " KADDR_FMT "\n", proc_struct_sz_ptr);
+							ret = KERN_SUCCESS;
+						}
 					}
 					pfinder_term(&pfinder);
 				}
@@ -877,6 +906,10 @@ find_task(pid_t pid, kaddr_t *task) {
 	if(kread_addr(kernproc + PROC_P_LIST_LH_FIRST_OFF, &proc) == KERN_SUCCESS) {
 		while(proc != 0 && kread_buf(proc + proc_p_pid_off, &cur_pid, sizeof(cur_pid)) == KERN_SUCCESS) {
 			if(cur_pid == pid) {
+				if(has_proc_struct_sz) {
+					*task = proc + proc_struct_sz;
+					return KERN_SUCCESS;
+				}
 				return kread_addr(proc + proc_task_off, task);
 			}
 			if(pid == 0 || kread_addr(proc + PROC_P_LIST_LE_PREV_OFF, &proc) != KERN_SUCCESS) {
@@ -1163,7 +1196,7 @@ dimentio_init(kaddr_t _kslide, kread_func_t _kread_buf, kwrite_func_t _kwrite_bu
 			kwrite_buf = kwrite_buf_kmem;
 		}
 		if(kread_buf != NULL && kwrite_buf != NULL && setpriority(PRIO_PROCESS, 0, PRIO_MIN) != -1) {
-			if(pfinder_init_offsets() == KERN_SUCCESS) {
+			if(pfinder_init_offsets() == KERN_SUCCESS && (!has_proc_struct_sz || kread_buf(proc_struct_sz_ptr, &proc_struct_sz, sizeof(proc_struct_sz)) == KERN_SUCCESS)) {
 				return KERN_SUCCESS;
 			}
 			setpriority(PRIO_PROCESS, 0, 0);
