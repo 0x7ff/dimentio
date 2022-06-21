@@ -83,7 +83,12 @@ typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
 typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t), (*kernrw_0_req_kernrw_func_t)(void);
 
 typedef struct {
-	struct section_64 sec_text, sec_cstring;
+	struct section_64 s64;
+	char *data;
+} sec_64_t;
+
+typedef struct {
+	sec_64_t sec_text, sec_cstring;
 } pfinder_t;
 
 kern_return_t
@@ -287,58 +292,56 @@ find_section(kaddr_t p, struct segment_command_64 sg64, const char *sect_name, s
 	return KERN_FAILURE;
 }
 
+static void
+sec_reset(sec_64_t *sec) {
+	memset(&sec->s64, '\0', sizeof(sec->s64));
+	sec->data = NULL;
+}
+
+static void
+sec_term(sec_64_t *sec) {
+	free(sec->data);
+}
+
 static kern_return_t
-sec_read_buf(struct section_64 sec, kaddr_t addr, void *buf, size_t sz) {
+sec_read_buf(sec_64_t sec, kaddr_t addr, void *buf, size_t sz) {
 	size_t off;
 
-	if(addr >= sec.addr && sz <= sec.size && (off = addr - sec.addr) <= sec.size - sz) {
-		return kread_buf(sec.addr + off, buf, sz);
+	if(addr < sec.s64.addr || sz > sec.s64.size || (off = addr - sec.s64.addr) > sec.s64.size - sz) {
+		return KERN_FAILURE;
 	}
-	return KERN_FAILURE;
+	memcpy(buf, sec.data + off, sz);
+	return KERN_SUCCESS;
 }
 
 static void
 pfinder_reset(pfinder_t *pfinder) {
-	memset(&pfinder->sec_text, '\0', sizeof(pfinder->sec_text));
-	memset(&pfinder->sec_cstring, '\0', sizeof(pfinder->sec_cstring));
+	sec_reset(&pfinder->sec_text);
+	sec_reset(&pfinder->sec_cstring);
 }
 
 static void
 pfinder_term(pfinder_t *pfinder) {
+	sec_term(&pfinder->sec_text);
+	sec_term(&pfinder->sec_cstring);
 	pfinder_reset(pfinder);
-}
-
-static size_t
-kstrlen(kaddr_t p) {
-	size_t i;
-	char c;
-
-	for(i = 0; kread_buf(p + i, &c, 1) == KERN_SUCCESS; ++i) {
-		if(c == '\0') {
-			break;
-		}
-	}
-	return i;
-}
-
-static int
-kstrncmp(kaddr_t p, const char *s0, size_t len) {
-	char *s = malloc(len);
-	int ret = 1;
-
-	if(s != NULL) {
-		if(kread_buf(p, s, len) == KERN_SUCCESS) {
-			ret = strncmp(s, s0, len);
-		}
-		free(s);
-	}
-	return ret;
 }
 
 #if TARGET_OS_OSX
 static int
 kstrcmp(kaddr_t p, const char *s0) {
-	return kstrncmp(p, s0, strlen(s0));
+	size_t len = strlen(s0);
+	int ret = 1;
+	char *s;
+
+	if((s = malloc(len + 1)) != NULL) {
+		s[len] = '\0';
+		if(kread_buf(p, s, len) == KERN_SUCCESS) {
+			ret = strcmp(s, s0);
+		}
+		free(s);
+	}
+	return ret;
 }
 #endif
 
@@ -376,16 +379,16 @@ pfinder_init_macho(pfinder_t *pfinder, size_t off) {
 				}
 				if(mh64.filetype == MH_EXECUTE) {
 					if(strncmp(sg64.segname, SEG_TEXT_EXEC, sizeof(sg64.segname)) == 0) {
-						if(find_section(p + sizeof(sg64), sg64, SECT_TEXT, &s64) != KERN_SUCCESS) {
+						if(find_section(p + sizeof(sg64), sg64, SECT_TEXT, &s64) != KERN_SUCCESS || s64.size == 0 || (pfinder->sec_text.data = malloc(s64.size)) == NULL || kread_buf(s64.addr, pfinder->sec_text.data, s64.size) != KERN_SUCCESS) {
 							break;
 						}
-						pfinder->sec_text = s64;
+						pfinder->sec_text.s64 = s64;
 						printf("sec_text_addr: " KADDR_FMT ", sec_text_off: 0x%" PRIX32 ", sec_text_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
 					} else if(strncmp(sg64.segname, SEG_TEXT, sizeof(sg64.segname)) == 0) {
-						if(find_section(p + sizeof(sg64), sg64, SECT_CSTRING, &s64) != KERN_SUCCESS) {
+						if(find_section(p + sizeof(sg64), sg64, SECT_CSTRING, &s64) != KERN_SUCCESS || s64.size == 0 || (pfinder->sec_cstring.data = malloc(s64.size)) == NULL || kread_buf(s64.addr, pfinder->sec_cstring.data, s64.size) != KERN_SUCCESS) {
 							break;
 						}
-						pfinder->sec_cstring = s64;
+						pfinder->sec_cstring.s64 = s64;
 						printf("sec_cstring_addr: " KADDR_FMT ", sec_cstring_off: 0x%" PRIX32 ", sec_cstring_sz: 0x%" PRIX64 "\n", s64.addr, s64.offset, s64.size);
 					}
 				}
@@ -403,7 +406,7 @@ pfinder_init_macho(pfinder_t *pfinder, size_t off) {
 				}
 			}
 #endif
-			if(pfinder->sec_text.size != 0 && pfinder->sec_cstring.size != 0) {
+			if(pfinder->sec_text.s64.size != 0 && pfinder->sec_cstring.s64.size != 0) {
 				return KERN_SUCCESS;
 			}
 		}
@@ -457,13 +460,13 @@ pfinder_xref_rd(pfinder_t pfinder, uint32_t rd, kaddr_t start, kaddr_t to) {
 
 static kaddr_t
 pfinder_xref_str(pfinder_t pfinder, const char *str, uint32_t rd) {
-	kaddr_t p, e;
+	const char *p, *e;
 	size_t len;
 
-	for(p = pfinder.sec_cstring.addr, e = p + pfinder.sec_cstring.size; p != e; p += len) {
-		len = kstrlen(p) + 1;
-		if(kstrncmp(p, str, len) == 0) {
-			return pfinder_xref_rd(pfinder, rd, pfinder.sec_text.addr, pfinder.sec_cstring.addr + (p - pfinder.sec_cstring.addr));
+	for(p = pfinder.sec_cstring.data, e = p + pfinder.sec_cstring.s64.size; p != e; p += len) {
+		len = strlen(p) + 1;
+		if(strncmp(str, p, len) == 0) {
+			return pfinder_xref_rd(pfinder, rd, pfinder.sec_text.s64.addr, pfinder.sec_cstring.s64.addr + (kaddr_t)(p - pfinder.sec_cstring.data));
 		}
 	}
 	return 0;
