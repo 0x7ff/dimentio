@@ -30,9 +30,11 @@
 #define OS_STRING_LEN_OFF (0xC)
 #define KCOMP_HDR_PAD_SZ (0x16C)
 #define OS_STRING_STRING_OFF (0x10)
+#define KALLOC_ARRAY_TYPE_BIT (47U)
 #define IPC_SPACE_IS_TABLE_OFF (0x20)
 #define IPC_ENTRY_IE_OBJECT_OFF (0x0)
 #define PROC_P_LIST_LE_PREV_OFF (0x8)
+#define KALLOC_ARRAY_TYPE_SHIFT (45U)
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define PROC_P_LIST_LH_FIRST_OFF (0x0)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
@@ -54,6 +56,7 @@
 #define DER_SEQ (0x30U)
 #define DER_IA5_STR (0x16U)
 #define DER_OCTET_STR (0x4U)
+#define ARM_PGSHIFT_16K (14U)
 #define PROC_PIDREGIONINFO (7)
 #define RD(a) extract32(a, 0, 5)
 #define RN(a) extract32(a, 5, 5)
@@ -161,12 +164,12 @@ static int kmem_fd = -1;
 static unsigned t1sz_boot;
 static void *krw_0, *kernrw_0;
 static kread_func_t kread_buf;
-static bool has_proc_struct_sz;
 static task_t tfp0 = TASK_NULL;
 static uint64_t proc_struct_sz;
 static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
+static bool has_proc_struct_sz, has_kalloc_array_decode;
 static kaddr_t kbase, kernproc, proc_struct_sz_ptr, vm_kernel_link_addr, our_task;
 static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off, ipc_port_ip_kobject_off;
 
@@ -973,6 +976,14 @@ pfinder_init_offsets(void) {
 																		proc_p_pid_off = 0x60;
 																		has_proc_struct_sz = true;
 																		task_itk_space_off = 0x300;
+																		if(CFStringCompare(cf_str, CFSTR("8792.40.101.0.1"), kCFCompareNumerically) != kCFCompareLessThan) {
+#if TARGET_OS_OSX
+																			io_dt_nvram_of_dict_off = 0xC8;
+#else
+																			io_dt_nvram_of_dict_off = 0xC0;
+#endif
+																			has_kalloc_array_decode = true;
+																		}
 																	}
 																}
 															}
@@ -1028,6 +1039,22 @@ find_task(pid_t pid, kaddr_t *task) {
 	return KERN_FAILURE;
 }
 
+static void
+kalloc_array_decode(kaddr_t *addr) {
+	if(has_kalloc_array_decode) {
+		if(t1sz_boot != 0) {
+			if(((*addr >> KALLOC_ARRAY_TYPE_SHIFT) & 3U) != 0) {
+				*addr &= ~((3ULL << KALLOC_ARRAY_TYPE_SHIFT) | 0xFU);
+			} else {
+				*addr &= ~((3ULL << KALLOC_ARRAY_TYPE_SHIFT) | ((1U << ARM_PGSHIFT_16K) - 1U));
+			}
+			*addr |= 3ULL << KALLOC_ARRAY_TYPE_SHIFT;
+		} else {
+			*addr |= ~((1ULL << KALLOC_ARRAY_TYPE_BIT) - 1U);
+		}
+	}
+}
+
 static kern_return_t
 lookup_ipc_port(mach_port_name_t port_name, kaddr_t *ipc_port) {
 	kaddr_t itk_space, is_table;
@@ -1037,6 +1064,7 @@ lookup_ipc_port(mach_port_name_t port_name, kaddr_t *ipc_port) {
 		printf("itk_space: " KADDR_FMT "\n", itk_space);
 		if(kread_addr(itk_space + IPC_SPACE_IS_TABLE_OFF, &is_table) == KERN_SUCCESS) {
 			kxpacd(&is_table);
+			kalloc_array_decode(&is_table);
 			printf("is_table: " KADDR_FMT "\n", is_table);
 			return kread_addr(is_table + MACH_PORT_INDEX(port_name) * IPC_ENTRY_SZ + IPC_ENTRY_IE_OBJECT_OFF, ipc_port);
 		}
