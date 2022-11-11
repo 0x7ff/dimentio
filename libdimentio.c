@@ -1101,6 +1101,9 @@ nonce_generate(void) {
 				ret = IOConnectCallStructMethod(nonce_conn, APPLE_MOBILE_AP_NONCE_GENERATE_NONCE_SEL, NULL, 0, nonce_d, &nonce_d_sz);
 			}
 			IOServiceClose(nonce_conn);
+		} else {
+			puts("Please use \"ideviceinfo -k ApNonce\" to generate nonce.");
+			ret = KERN_SUCCESS;
 		}
 		IOObjectRelease(nonce_serv);
 	}
@@ -1198,10 +1201,10 @@ set_nvram_prop(io_registry_entry_t nvram_entry, const char *key, const char *val
 
 static kern_return_t
 sync_nonce(io_registry_entry_t nvram_entry) {
-	if(set_nvram_prop(nvram_entry, "temp_key", "temp_val") == KERN_SUCCESS && set_nvram_prop(nvram_entry, kIONVRAMDeletePropertyKey, "temp_key") == KERN_SUCCESS) {
-		return set_nvram_prop(nvram_entry, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey);
+	if(set_nvram_prop(nvram_entry, "temp_key", "temp_val") != KERN_SUCCESS || set_nvram_prop(nvram_entry, kIONVRAMDeletePropertyKey, "temp_key") != KERN_SUCCESS || set_nvram_prop(nvram_entry, kIONVRAMForceSyncNowPropertyKey, kBootNoncePropertyKey) != KERN_SUCCESS) {
+		puts("Please use \"ideviceenterrecovery UDID\" to enter recovery mode.");
 	}
-	return KERN_FAILURE;
+	return KERN_SUCCESS;
 }
 
 static size_t
