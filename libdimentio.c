@@ -34,7 +34,6 @@
 #define IPC_SPACE_IS_TABLE_OFF (0x20)
 #define IPC_ENTRY_IE_OBJECT_OFF (0x0)
 #define PROC_P_LIST_LE_PREV_OFF (0x8)
-#define KALLOC_ARRAY_TYPE_SHIFT (45U)
 #define OS_DICTIONARY_COUNT_OFF (0x14)
 #define PROC_P_LIST_LH_FIRST_OFF (0x0)
 #define OS_DICTIONARY_DICT_ENTRY_OFF (0x20)
@@ -169,7 +168,7 @@ static uint64_t proc_struct_sz;
 static kwrite_func_t kwrite_buf;
 static krw_0_kread_func_t krw_0_kread;
 static krw_0_kwrite_func_t krw_0_kwrite;
-static bool has_proc_struct_sz, has_kalloc_array_decode;
+static bool has_proc_struct_sz, has_kalloc_array_decode, kalloc_array_decode_v2;
 static kaddr_t kbase, kernproc, proc_struct_sz_ptr, vm_kernel_link_addr, our_task;
 static size_t proc_task_off, proc_p_pid_off, task_itk_space_off, io_dt_nvram_of_dict_off, ipc_port_ip_kobject_off;
 
@@ -983,6 +982,9 @@ pfinder_init_offsets(void) {
 																			io_dt_nvram_of_dict_off = 0xC0;
 #endif
 																			has_kalloc_array_decode = true;
+																			if(CFStringCompare(cf_str, CFSTR("8792.80.25.121.4"), kCFCompareNumerically) != kCFCompareLessThan) {
+																				kalloc_array_decode_v2 = true;
+																			}
 																		}
 																	}
 																}
@@ -1041,14 +1043,27 @@ find_task(pid_t pid, kaddr_t *task) {
 
 static void
 kalloc_array_decode(kaddr_t *addr) {
+	unsigned kalloc_array_type_shift;
+
 	if(has_kalloc_array_decode) {
 		if(t1sz_boot != 0) {
-			if(((*addr >> KALLOC_ARRAY_TYPE_SHIFT) & 3U) != 0) {
-				*addr &= ~((3ULL << KALLOC_ARRAY_TYPE_SHIFT) | 0xFU);
+			if(kalloc_array_decode_v2) {
+				kalloc_array_type_shift = 63 - t1sz_boot;
+				if(((*addr >> kalloc_array_type_shift) & 1U) != 0) {
+					*addr &= ~0x1FULL;
+				} else {
+					*addr &= ~((1U << ARM_PGSHIFT_16K) - 1U);
+					*addr |= 1ULL << kalloc_array_type_shift;
+				}
 			} else {
-				*addr &= ~((3ULL << KALLOC_ARRAY_TYPE_SHIFT) | ((1U << ARM_PGSHIFT_16K) - 1U));
+				kalloc_array_type_shift = 62 - t1sz_boot;
+				if(((*addr >> kalloc_array_type_shift) & 3U) != 0) {
+					*addr &= ~0xFULL;
+				} else {
+					*addr &= ~((1U << ARM_PGSHIFT_16K) - 1U);
+					*addr |= 3ULL << kalloc_array_type_shift;
+				}
 			}
-			*addr |= 3ULL << KALLOC_ARRAY_TYPE_SHIFT;
 		} else {
 			*addr |= ~((1ULL << KALLOC_ARRAY_TYPE_BIT) - 1U);
 		}
