@@ -101,7 +101,7 @@ typedef uint32_t IOOptionBits;
 typedef mach_port_t io_object_t;
 typedef kern_return_t (*kernrw_0_kbase_func_t)(kaddr_t *);
 typedef io_object_t io_service_t, io_connect_t, io_registry_entry_t;
-typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(const void *, kaddr_t, size_t), (*kernrw_0_req_kernrw_func_t)(void);
+typedef int (*krw_0_kbase_func_t)(kaddr_t *), (*krw_0_kread_func_t)(kaddr_t, void *, size_t), (*krw_0_kwrite_func_t)(kaddr_t, const void *, size_t), (*kernrw_0_req_kernrw_func_t)(void);
 
 typedef struct {
 	struct section_64 s64;
@@ -309,7 +309,7 @@ kread_buf_krw_0(kaddr_t addr, void *buf, size_t sz) {
 
 static kern_return_t
 kwrite_buf_krw_0(kaddr_t addr, const void *buf, size_t sz) {
-	return krw_0_kwrite(buf, addr, sz) == 0 ? KERN_SUCCESS : KERN_FAILURE;
+	return krw_0_kwrite(addr, buf, sz) == 0 ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 static kern_return_t
