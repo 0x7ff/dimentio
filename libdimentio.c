@@ -1339,10 +1339,10 @@ dimentio_init(kaddr_t _kbase, kread_func_t _kread_buf, kwrite_func_t _kwrite_buf
 			printf("tfp0: 0x%" PRIX32 "\n", tfp0);
 			kread_buf = kread_buf_tfp0;
 			kwrite_buf = kwrite_buf_tfp0;
-		} else if((kernrw_0 = dlopen("/var/jb/usr/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0) {
+		} else if((kernrw_0 = dlopen(""PREFIX"/lib/libkernrw.0.dylib", RTLD_LAZY)) != NULL && (kernrw_0_req = (kernrw_0_req_kernrw_func_t)dlsym(kernrw_0, "requestKernRw")) != NULL && kernrw_0_req() == 0) {
 			kread_buf = (kread_func_t)dlsym(kernrw_0, "kernRW_readbuf");
 			kwrite_buf = (kwrite_func_t)dlsym(kernrw_0, "kernRW_writebuf");
-		} else if((krw_0 = dlopen("/var/jb/usr/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
+		} else if((krw_0 = dlopen(""PREFIX"/lib/libkrw.0.dylib", RTLD_LAZY)) != NULL && (krw_0_kread = (krw_0_kread_func_t)dlsym(krw_0, "kread")) != NULL && (krw_0_kwrite = (krw_0_kwrite_func_t)dlsym(krw_0, "kwrite")) != NULL) {
 			kread_buf = kread_buf_krw_0;
 			kwrite_buf = kwrite_buf_krw_0;
 		} else if((kmem_fd = open("/dev/kmem", O_RDWR | O_CLOEXEC)) != -1) {
